@@ -40,6 +40,28 @@ func init() {
 	DeclFunc("RunningAverage", RunningAverage, "Records the time-average of a quantity from the moment this function is called.<br>Note: this may impact performance since the Quantity will be evaluated after every step.")
 	DeclFunc("Sum", Sum, "Sum of Quantity over all cells in the grid. For a vector Quantity, all components are added together.")
 	DeclFunc("SumVector", SumVector, "Sum of vector Quantity over all cells in the grid.")
+	DeclFunc("QSin", QSin, "Pointwise sine of a quantity: QSin(q)")
+	DeclFunc("QCos", QCos, "Pointwise cosine of a quantity: QCos(q)")
+	DeclFunc("QExp", QExp, "Pointwise exponential of a quantity: QExp(q)")
+	DeclFunc("QLog", QLog, "Pointwise natural logarithm of a quantity: QLog(q)")
+	DeclFunc("QAbs", QAbs, "Pointwise absolute value of a quantity: QAbs(q)")
+	DeclFunc("QAcos", QAcos, "Pointwise arccos of a quantity: QAcos(q)")
+	DeclFunc("QAcosh", QAcosh, "Pointwise inverse hyperbolic cosine: QAcosh(q)")
+	DeclFunc("QAsin", QAsin, "Pointwise arcsine of a quantity: QAsin(q)")
+	DeclFunc("QAsinh", QAsinh, "Pointwise inverse hyperbolic sine: QAsinh(q)")
+	DeclFunc("QAtan", QAtan, "Pointwise arctangent of a quantity: QAtan(q)")
+	DeclFunc("QAtanh", QAtanh, "Pointwise inverse hyperbolic tangent: QAtanh(q)")
+	DeclFunc("QCosh", QCosh, "Pointwise hyperbolic cosine: QCosh(q)")
+	DeclFunc("QSinh", QSinh, "Pointwise hyperbolic sine: QSinh(q)")
+	DeclFunc("QTan", QTan, "Pointwise tangent: QTan(q)")
+	DeclFunc("QTanh", QTanh, "Pointwise hyperbolic tangent: QTanh(q)")
+	DeclFunc("QErf", QErf, "Pointwise error function: QErf(q)")
+	DeclFunc("QErfc", QErfc, "Pointwise complementary error function: QErfc(q)")
+	DeclFunc("QGamma", QGamma, "Pointwise gamma function: QGamma(q)")
+	DeclFunc("QHeaviside", QHeaviside, "Pointwise Heaviside step function: QHeaviside(q)")
+	DeclFunc("QSinc", QSinc, "Pointwise normalized sinc function: QSinc(q)")
+	DeclFunc("QMod", QMod, "Pointwise modulo: QMod(a,b)")
+	DeclFunc("QPow", QPow, "Pointwise power: QPow(a,b)")
 }
 
 // Removes all customfields
@@ -523,4 +545,344 @@ func SumVector(q Quantity) data.Vector {
 		v[i] = float64(cuda.Sum(val.Comp(i)))
 	}
 	return Vector(v[0], v[1], v[2])
+}
+
+var TimeQ = NewScalarField("TimeQ", "s", "Simulation time", func(dst *data.Slice) {
+	cuda.Memset(dst, float32(Time))
+})
+
+var TimeQVec = NewVectorField("TimeQVec", "s", "Simulation time (vector)", func(dst *data.Slice) {
+	t := float32(Time)
+	for c := 0; c < 3; c++ {
+		cuda.Memset(dst.Comp(c), t)
+	}
+})
+
+// QSin returns a Quantity representing sin(q) evaluated pointwise
+func QSin(q Quantity) Quantity {
+	return &sinOp{q}
+}
+
+type sinOp struct {
+	orig Quantity
+}
+
+func (s *sinOp) NComp() int {
+	return s.orig.NComp()
+}
+
+func (s *sinOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(s.orig)
+	defer cuda.Recycle(src)
+	cuda.QSin(dst, src)
+}
+
+// QCos returns a Quantity representing cos(q) evaluated pointwise
+func QCos(q Quantity) Quantity {
+	return &cosOp{q}
+}
+
+type cosOp struct{ orig Quantity }
+
+func (op *cosOp) NComp() int { return op.orig.NComp() }
+func (op *cosOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QCos(dst, src)
+}
+
+// QExp: pointwise exponential
+func QExp(q Quantity) Quantity {
+	return &expOp{q}
+}
+
+type expOp struct{ orig Quantity }
+
+func (op *expOp) NComp() int { return op.orig.NComp() }
+func (op *expOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QExp(dst, src)
+}
+
+// QLog: pointwise natural logarithm
+func QLog(q Quantity) Quantity {
+	return &logOp{q}
+}
+
+type logOp struct{ orig Quantity }
+
+func (op *logOp) NComp() int { return op.orig.NComp() }
+func (op *logOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QLog(dst, src)
+}
+
+// QAbs: pointwise absolute value
+func QAbs(q Quantity) Quantity {
+	return &absOp{q}
+}
+
+type absOp struct{ orig Quantity }
+
+func (op *absOp) NComp() int { return op.orig.NComp() }
+func (op *absOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QAbs(dst, src)
+}
+
+// QAcos: pointwise arccos
+func QAcos(q Quantity) Quantity {
+	return &acosOp{q}
+}
+
+type acosOp struct{ orig Quantity }
+
+func (op *acosOp) NComp() int { return op.orig.NComp() }
+func (op *acosOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QAcos(dst, src)
+}
+
+// QAcosh: pointwise inverse hyperbolic cosine
+func QAcosh(q Quantity) Quantity {
+	return &acoshOp{q}
+}
+
+type acoshOp struct{ orig Quantity }
+
+func (op *acoshOp) NComp() int { return op.orig.NComp() }
+func (op *acoshOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QAcosh(dst, src)
+}
+
+// QAsin: pointwise arcsine
+func QAsin(q Quantity) Quantity {
+	return &asinOp{q}
+}
+
+type asinOp struct{ orig Quantity }
+
+func (op *asinOp) NComp() int { return op.orig.NComp() }
+func (op *asinOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QAsin(dst, src)
+}
+
+// QAsinh: pointwise inverse hyperbolic sine
+func QAsinh(q Quantity) Quantity {
+	return &asinhOp{q}
+}
+
+type asinhOp struct{ orig Quantity }
+
+func (op *asinhOp) NComp() int { return op.orig.NComp() }
+func (op *asinhOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QAsinh(dst, src)
+}
+
+// QAtan: pointwise arctangent
+func QAtan(q Quantity) Quantity {
+	return &atanOp{q}
+}
+
+type atanOp struct{ orig Quantity }
+
+func (op *atanOp) NComp() int { return op.orig.NComp() }
+func (op *atanOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QAtan(dst, src)
+}
+
+// QAtanh: pointwise inverse hyperbolic tangent
+func QAtanh(q Quantity) Quantity {
+	return &atanhOp{q}
+}
+
+type atanhOp struct{ orig Quantity }
+
+func (op *atanhOp) NComp() int { return op.orig.NComp() }
+func (op *atanhOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QAtanh(dst, src)
+}
+
+// QCosh: pointwise hyperbolic cosine
+func QCosh(q Quantity) Quantity {
+	return &coshOp{q}
+}
+
+type coshOp struct{ orig Quantity }
+
+func (op *coshOp) NComp() int { return op.orig.NComp() }
+func (op *coshOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QCosh(dst, src)
+}
+
+// QSinh: pointwise hyperbolic sine
+func QSinh(q Quantity) Quantity {
+	return &sinhOp{q}
+}
+
+type sinhOp struct{ orig Quantity }
+
+func (op *sinhOp) NComp() int { return op.orig.NComp() }
+func (op *sinhOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QSinh(dst, src)
+}
+
+// QTan: pointwise tangent
+func QTan(q Quantity) Quantity {
+	return &tanOp{q}
+}
+
+type tanOp struct{ orig Quantity }
+
+func (op *tanOp) NComp() int { return op.orig.NComp() }
+func (op *tanOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QTan(dst, src)
+}
+
+// QTanh: pointwise hyperbolic tangent
+func QTanh(q Quantity) Quantity {
+	return &tanhOp{q}
+}
+
+type tanhOp struct{ orig Quantity }
+
+func (op *tanhOp) NComp() int { return op.orig.NComp() }
+func (op *tanhOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QTanh(dst, src)
+}
+
+// QErf: pointwise error function
+func QErf(q Quantity) Quantity {
+	return &erfOp{q}
+}
+
+type erfOp struct{ orig Quantity }
+
+func (op *erfOp) NComp() int { return op.orig.NComp() }
+func (op *erfOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QErf(dst, src)
+}
+
+// QErfc: pointwise complementary error function
+func QErfc(q Quantity) Quantity {
+	return &erfcOp{q}
+}
+
+type erfcOp struct{ orig Quantity }
+
+func (op *erfcOp) NComp() int { return op.orig.NComp() }
+func (op *erfcOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QErfc(dst, src)
+}
+
+// QGamma: pointwise gamma function
+func QGamma(q Quantity) Quantity {
+	return &gammaOp{q}
+}
+
+type gammaOp struct{ orig Quantity }
+
+func (op *gammaOp) NComp() int { return op.orig.NComp() }
+func (op *gammaOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QGamma(dst, src)
+}
+
+// QHeaviside: pointwise Heaviside step function
+func QHeaviside(q Quantity) Quantity {
+	return &heavisideOp{q}
+}
+
+type heavisideOp struct{ orig Quantity }
+
+func (op *heavisideOp) NComp() int { return op.orig.NComp() }
+func (op *heavisideOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QHeaviside(dst, src)
+}
+
+// QSinc: pointwise normalized sinc function
+func QSinc(q Quantity) Quantity {
+	return &sincOp{q}
+}
+
+type sincOp struct{ orig Quantity }
+
+func (op *sincOp) NComp() int { return op.orig.NComp() }
+func (op *sincOp) EvalTo(dst *data.Slice) {
+	src := ValueOf(op.orig)
+	defer cuda.Recycle(src)
+	cuda.QSinc(dst, src)
+}
+
+// QMod: pointwise modulo (two-argument)
+func QMod(a, b Quantity) Quantity {
+	return &modOp{a, b}
+}
+
+type modOp struct{ a, b Quantity }
+
+func (op *modOp) NComp() int {
+	if op.a.NComp() >= op.b.NComp() {
+		return op.a.NComp()
+	}
+	return op.b.NComp()
+}
+
+func (op *modOp) EvalTo(dst *data.Slice) {
+	A := ValueOf(op.a)
+	defer cuda.Recycle(A)
+	B := ValueOf(op.b)
+	defer cuda.Recycle(B)
+	cuda.QMod(dst, A, B)
+}
+
+// QPow: pointwise power (two-argument)
+func QPow(a, b Quantity) Quantity {
+	return &powOp{a, b}
+}
+
+type powOp struct{ a, b Quantity }
+
+func (op *powOp) NComp() int {
+	if op.a.NComp() >= op.b.NComp() {
+		return op.a.NComp()
+	}
+	return op.b.NComp()
+}
+
+func (op *powOp) EvalTo(dst *data.Slice) {
+	A := ValueOf(op.a)
+	defer cuda.Recycle(A)
+	B := ValueOf(op.b)
+	defer cuda.Recycle(B)
+	cuda.QPow(dst, A, B)
 }
