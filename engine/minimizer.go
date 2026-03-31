@@ -5,7 +5,6 @@ package engine
 // Energy backtracking and stagnation recovery are retained from the improved version.
 
 import (
-	"log"
 	"math"
 	"time"
 
@@ -82,28 +81,25 @@ func (mini *Minimizer) Free() {
 // the denominator is too small or the result would be non-positive.
 const denomThresh = float32(1e-12)
 
-func bbStep(num, den float32, denomThresh float32) (float32, bool) {
-	// Reject tiny denominators (avoids blow-ups)
-	if float32(math.Abs(float64(den))) <= denomThresh {
+func bbStep(num, den float32, denomthresh float32) (float32, bool) {
+	const denomThresh = float32(1e-12)
+
+	if den <= 0 || float32(math.Abs(float64(den))) < denomThresh {
 		return 0, false
 	}
 
 	h := num / den
 
-	// Reject invalid values
 	if h <= 0 || math.IsNaN(float64(h)) || math.IsInf(float64(h), 0) {
 		return 0, false
 	}
 
-	// Clamp to safe range
-	const hMin = float32(1e-8)
-	const hMax = float32(1e8)
-
-	if h < hMin {
-		h = hMin
+	// very loose clamp (only prevent insanity)
+	if h > 1e6 {
+		h = 1e6
 	}
-	if h > hMax {
-		h = hMax
+	if h < 1e-8 {
+		h = 1e-8
 	}
 
 	return h, true
@@ -112,141 +108,79 @@ func (mini *Minimizer) Step() {
 	m := M.Buffer()
 	size := m.Size()
 
-	// GPUAccess() check catches post-Free() disabled slices, which have a
-	// non-nil pointer but zeroed memType and would panic on DevPtr().
 	if mini.k == nil || !mini.k.GPUAccess() {
 		mini.k = cuda.Buffer(3, size)
 		torqueFn(mini.k)
 	}
 
 	k := mini.k
+	h := mini.h
 
+	// save original magnetization
 	m0 := cuda.Buffer(3, size)
 	defer cuda.Recycle(m0)
 	data.Copy(m0, m)
 
-	const maxRetries = 8
-	const backtrackFactor = float32(0.5)
-	// backtrackThreshold: only run energy backtracking when h is large
-	// enough that an explosive step is plausible. Below this value the
-	// step is taken unconditionally, matching the original method.
-	const backtrackThreshold = float32(1e-3)
+	// take step
+	cuda.Minimize(m, m0, k, h)
 
-	accepted := false
-	if mini.h > backtrackThreshold {
-		mTrial := cuda.Buffer(3, size)
-		defer cuda.Recycle(mTrial)
-
-		E0 := GetTotalEnergy()
-
-		for i := 0; i < maxRetries; i++ {
-			data.Copy(mTrial, m0)
-			cuda.Minimize(mTrial, m0, k, mini.h)
-			data.Copy(m, mTrial)
-			M.normalize()
-			if GetTotalEnergy() <= E0 {
-				accepted = true
-				break
-			}
-			data.Copy(m, m0)
-			mini.h *= backtrackFactor
-		}
-
-		if accepted && mini.h < backtrackThreshold {
-			// Backtracking shrank h below the useful range. Reset to a safe
-			// value so BB sees a real displacement on the next step.
-			log.Printf("Minimize: backtrack shrank h to %.3e at step=%d, resetting to 1e-4", mini.h, NSteps)
-			mini.h = 1e-4
-		}
-	} else {
-		// h is small — take unconditionally, matching original behaviour.
-		cuda.Minimize(m, m0, k, mini.h)
-		M.normalize()
-		accepted = true
-	}
-
-	if !accepted {
-		log.Printf("Minimize: all retries failed at step=%d dm=%.3e h=%.3e, resetting to 1e-4", NSteps, mini.lastDm.Max(), mini.h)
-		data.Copy(m, m0)
-		mini.h = 1e-4
-		NSteps++
-		return
-	}
-
+	// compute new torque
 	k0 := cuda.Buffer(3, size)
 	defer cuda.Recycle(k0)
 	data.Copy(k0, k)
 	torqueFn(k)
 	setMaxTorque(k)
 
+	// aliases
 	dm := m0
 	dk := k0
 
+	// dm = m - m0
 	cuda.Madd2(dm, m, m0, 1., -1.)
+	// dk = k - k0
 	cuda.Madd2(dk, k, k0, -1., 1.)
 
+	// measure step
 	max_dm := cuda.MaxVecNorm(dm)
 	mini.lastDm.Add(max_dm)
 	setLastErr(mini.lastDm.Max())
 
-	dotDmDm := cuda.Dot(dm, dm)
-	dotDmDk := cuda.Dot(dm, dk)
-	dotDkDk := cuda.Dot(dk, dk)
-
-	log.Printf("Minimize: step=%d dm=%.3e dotDmDm=%.3e dotDmDk=%.3e dotDkDk=%.3e h=%.3e",
-		NSteps, max_dm, dotDmDm, dotDmDk, dotDkDk, mini.h)
-
-	// Alternating BB step selection.
-	// BB1 (even steps, long step):  h = dot(dm,dm) / dot(dm,dk)
-	//   Valid only when dotDmDk > 0; a negative dotDmDk means the gradient
-	//   reversed direction and BB1 would yield a negative (invalid) h.
-	// BB2 (odd steps, short step):  h = dot(dm,dk) / dot(dk,dk)
-	//   dotDkDk is a squared norm so non-negative, but dotDmDk can be
-	//   negative, making this ratio negative too — also invalid.
-	// bbStep() checks both the denominator magnitude and the sign of the
-	// result, so neither formula can produce a zero or negative step size.
-	// When the preferred formula is invalid we try the other; when both
-	// are invalid we leave h unchanged and log.
-
-	var newH float32
-	computed := false
-	var reason string
-
+	// dot products
+	var nom, div float32
 	if NSteps%2 == 0 {
-		// Prefer BB1 on even steps.
-		if h, ok := bbStep(dotDmDm, dotDmDk, denomThresh); ok {
-			newH = h
-			computed = true
-		} else if h, ok := bbStep(dotDmDk, dotDkDk, denomThresh); ok {
-			newH = h
-			computed = true
-			reason = "BB1 invalid, used BB2 fallback"
-		}
+		nom = cuda.Dot(dm, dm)
+		div = cuda.Dot(dm, dk)
 	} else {
-		// Prefer BB2 on odd steps.
-		if h, ok := bbStep(dotDmDk, dotDkDk, denomThresh); ok {
-			newH = h
-			computed = true
-		} else if h, ok := bbStep(dotDmDm, dotDmDk, denomThresh); ok {
-			newH = h
-			computed = true
-			reason = "BB2 invalid, used BB1 fallback"
-		}
+		nom = cuda.Dot(dm, dk)
+		div = cuda.Dot(dk, dk)
 	}
 
-	if computed {
-		if reason != "" {
-			log.Printf("Minimize: step=%d %s h=%.3e", NSteps, reason, newH)
-		}
-		mini.h = newH
-	} else {
-		// Both BB formulas invalid this step (gradient reversal or near-zero
-		// displacement). Keep h at its current value — it is already at a
-		// safe scale and the next step will re-establish a valid estimate.
-		log.Printf("Minimize: step=%d both BB invalid (dotDmDk=%.3e dotDkDk=%.3e), h unchanged=%.3e",
-			NSteps, dotDmDk, dotDkDk, mini.h)
-	}
+	// --------------------------------------------------
+	// 🔑 Minimal FIX: float32-safe division
+	// --------------------------------------------------
+	const denomThresh = float32(1e-12)
 
+	if float32(math.Abs(float64(div))) > denomThresh {
+		newH := nom / div
+
+		// minimal sanity check
+		if newH > 0 && !math.IsNaN(float64(newH)) && !math.IsInf(float64(newH), 0) {
+
+			// very loose clamp (only extremes)
+			if newH > 1e6 {
+				newH = 1e6
+			}
+			if newH < 1e-12 {
+				newH = 1e-12
+			}
+
+			mini.h = newH
+		}
+		// else: keep previous h (important!)
+	}
+	// else: keep previous h (instead of resetting!)
+
+	M.normalize()
 	NSteps++
 }
 
@@ -304,8 +238,7 @@ func Minimize() bool {
 	if initialTorque > 0 {
 		mini.h = 1e-2 / initialTorque
 	}
-	log.Printf("Minimize: starting, initialTorque=%.3e h0=%.3e StopMaxDm=%.3e DmSamples=%d",
-		initialTorque, mini.h, StopMaxDm, DmSamples)
+	//log.printf("Minimize: starting, initialTorque=%.3e h0=%.3e StopMaxDm=%.3e DmSamples=%d", initialTorque, mini.h, StopMaxDm, DmSamples)
 
 	stepper = &mini
 
@@ -329,7 +262,7 @@ func Minimize() bool {
 		prevMaxDm = currentDm
 
 		if stagnationCount > DmSamples*2 {
-			log.Printf("Minimize: stagnation reset at dm=%.3e after %d steps", currentDm, NSteps)
+			//log.printf("Minimize: stagnation reset at dm=%.3e after %d steps", currentDm, NSteps)
 			if mini.k != nil {
 				mini.k.Free()
 			}
@@ -349,10 +282,10 @@ func Minimize() bool {
 			currentDm <= StopMaxDm
 
 		if !withinTime {
-			log.Printf("Minimize: exiting due to wall-clock limit at dm=%.3e after %d steps", currentDm, NSteps)
+			//log.printf("Minimize: exiting due to wall-clock limit at dm=%.3e after %d steps", currentDm, NSteps)
 		}
 		if converged {
-			log.Printf("Minimize: converged at dm=%.3e after %d steps", currentDm, NSteps)
+			//log.printf("Minimize: converged at dm=%.3e after %d steps", currentDm, NSteps)
 		}
 
 		return !converged && withinTime
