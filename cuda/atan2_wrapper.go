@@ -18,8 +18,8 @@ var pw_atan2_code cu.Function
 // Stores the arguments for pw_atan2 kernel invocation
 type pw_atan2_args_t struct{
 	 arg_dst unsafe.Pointer
-	 arg_y unsafe.Pointer
-	 arg_x unsafe.Pointer
+	 arg_a unsafe.Pointer
+	 arg_b unsafe.Pointer
 	 arg_N int
 	 argptr [4]unsafe.Pointer
 	sync.Mutex
@@ -31,13 +31,13 @@ var pw_atan2_args pw_atan2_args_t
 func init(){
 	// CUDA driver kernel call wants pointers to arguments, set them up once.
 	 pw_atan2_args.argptr[0] = unsafe.Pointer(&pw_atan2_args.arg_dst)
-	 pw_atan2_args.argptr[1] = unsafe.Pointer(&pw_atan2_args.arg_y)
-	 pw_atan2_args.argptr[2] = unsafe.Pointer(&pw_atan2_args.arg_x)
+	 pw_atan2_args.argptr[1] = unsafe.Pointer(&pw_atan2_args.arg_a)
+	 pw_atan2_args.argptr[2] = unsafe.Pointer(&pw_atan2_args.arg_b)
 	 pw_atan2_args.argptr[3] = unsafe.Pointer(&pw_atan2_args.arg_N)
 	 }
 
 // Wrapper for pw_atan2 CUDA kernel, asynchronous.
-func k_pw_atan2_async ( dst unsafe.Pointer, y unsafe.Pointer, x unsafe.Pointer, N int,  cfg *config) {
+func k_pw_atan2_async ( dst unsafe.Pointer, a unsafe.Pointer, b unsafe.Pointer, N int,  cfg *config) {
 	if Synchronous{ // debug
 		Sync()
 		timer.Start("pw_atan2")
@@ -51,8 +51,8 @@ func k_pw_atan2_async ( dst unsafe.Pointer, y unsafe.Pointer, x unsafe.Pointer, 
 	}
 
 	 pw_atan2_args.arg_dst = dst
-	 pw_atan2_args.arg_y = y
-	 pw_atan2_args.arg_x = x
+	 pw_atan2_args.arg_a = a
+	 pw_atan2_args.arg_b = b
 	 pw_atan2_args.arg_N = N
 	
 
