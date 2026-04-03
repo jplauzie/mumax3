@@ -1,0 +1,62 @@
+package engine
+
+import (
+	"github.com/mumax/3/cuda"
+	"github.com/mumax/3/data"
+	"github.com/mumax/3/script"
+)
+
+func init() {
+	DeclROnly("timeQ_scalar", TimeQ_scalar, "Current simulation time as a scalar Quantity (s)")
+	DeclROnly("timeQ_vector", TimeQ_vector, "Current simulation time as a vector Quantity (s)")
+	DeclFunc("ScalarFuncQ", ScalarFuncQ, "Wraps a scalar function of time (e.g. sin(t)) as a Quantity usable in field expressions")
+	DeclFunc("VectorFuncQ", VectorFuncQ, "Wraps three scalar functions of time as a vector Quantity (e.g. VectorFuncQ(sin(t), 0, cos(t)))")
+}
+
+// ---- Scalar time Quantity ----
+
+type timeQuantity struct {
+	nComp int
+}
+
+var TimeQ_scalar Quantity = &timeQuantity{1}
+var TimeQ_vector Quantity = &timeQuantity{3}
+
+func (t *timeQuantity) NComp() int { return t.nComp }
+
+func (t *timeQuantity) EvalTo(dst *data.Slice) {
+	v := float32(Time)
+	for c := 0; c < t.nComp; c++ {
+		cuda.Memset(dst.Comp(c), v)
+	}
+}
+
+type scalarFuncQuantity struct {
+	f script.ScalarFunction
+}
+
+func (q *scalarFuncQuantity) NComp() int { return 1 }
+
+func (q *scalarFuncQuantity) EvalTo(dst *data.Slice) {
+	cuda.Memset(dst.Comp(0), float32(q.f.Float()))
+}
+
+func ScalarFuncQ(f script.ScalarFunction) Quantity {
+	return &scalarFuncQuantity{f}
+}
+
+type vectorFuncQuantity struct {
+	fx, fy, fz script.ScalarFunction
+}
+
+func (q *vectorFuncQuantity) NComp() int { return 3 }
+
+func (q *vectorFuncQuantity) EvalTo(dst *data.Slice) {
+	cuda.Memset(dst.Comp(0), float32(q.fx.Float()))
+	cuda.Memset(dst.Comp(1), float32(q.fy.Float()))
+	cuda.Memset(dst.Comp(2), float32(q.fz.Float()))
+}
+
+func VectorFuncQ(fx, fy, fz script.ScalarFunction) Quantity {
+	return &vectorFuncQuantity{fx, fy, fz}
+}
