@@ -7,29 +7,22 @@ import (
 )
 
 func init() {
-	DeclROnly("timeQ_scalar", TimeQ_scalar, "Current simulation time as a scalar Quantity (s)")
-	DeclROnly("timeQ_vector", TimeQ_vector, "Current simulation time as a vector Quantity (s)")
+	DeclROnly("timeQ_s", TimeQ_s, "Current simulation time as a scalar Quantity (s)")
+	DeclROnly("timeQ_v", TimeQ_v, "Current simulation time as a vector Quantity (s)")
 	DeclFunc("ScalarFuncQ", ScalarFuncQ, "Wraps a scalar function of time (e.g. sin(t)) as a Quantity usable in field expressions")
 	DeclFunc("VectorFuncQ", VectorFuncQ, "Wraps three scalar functions of time as a vector Quantity (e.g. VectorFuncQ(sin(t), 0, cos(t)))")
 }
 
-// ---- Scalar time Quantity ----
+var TimeQ_s = NewScalarField("TimeQ", "s", "Simulation time", func(dst *data.Slice) {
+	cuda.Memset(dst, float32(Time))
+})
 
-type timeQuantity struct {
-	nComp int
-}
-
-var TimeQ_scalar Quantity = &timeQuantity{1}
-var TimeQ_vector Quantity = &timeQuantity{3}
-
-func (t *timeQuantity) NComp() int { return t.nComp }
-
-func (t *timeQuantity) EvalTo(dst *data.Slice) {
-	v := float32(Time)
-	for c := 0; c < t.nComp; c++ {
-		cuda.Memset(dst.Comp(c), v)
+var TimeQ_v = NewVectorField("TimeQVec", "s", "Simulation time (vector)", func(dst *data.Slice) {
+	t := float32(Time)
+	for c := 0; c < 3; c++ {
+		cuda.Memset(dst.Comp(c), t)
 	}
-}
+})
 
 type scalarFuncQuantity struct {
 	f script.ScalarFunction

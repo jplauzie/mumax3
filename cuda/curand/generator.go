@@ -49,7 +49,6 @@ func (g Generator) SetSeed(seed int64) {
 	}
 }
 
-// Documentation was taken from the curand headers.
 func (g Generator) GenerateUniform(output uintptr, n int64) {
 	err := Status(C.curandGenerateUniform(
 		C.curandGenerator_t(unsafe.Pointer(uintptr(g))),
