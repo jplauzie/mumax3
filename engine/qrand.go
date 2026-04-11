@@ -9,27 +9,8 @@ import (
 )
 
 func init() {
-	DeclFunc("QrandGen", QrandGenNew, "Generic random Quantity. Args: seed, nComp (1 or 3), distType, updateMode, mean, stddev. distType: 0=normal, 1=uniform. updateMode: 0=static, 1=per-step.")
-	r.step = -1
+	DeclFunc("QrandGen", QrandGenNew, "Generic random Quantity. Args: seed, nComp (1 or 3), distType (0=normal, 1=uniform), updateMode (0=static, 1=per-step), mean, stddev.")
 }
-
-// ============================================================
-// 🔧 Constants (keep scripts readable)
-// ============================================================
-
-const (
-	DistNormal  = 0
-	DistUniform = 1
-)
-
-const (
-	UpdateStatic = 0
-	UpdateStep   = 1
-)
-
-// ============================================================
-// 🔧 Shared random generator
-// ============================================================
 
 type randGen struct {
 	seed      int64
@@ -38,155 +19,76 @@ type randGen struct {
 	step      int
 }
 
-func (r *randGen) ensureReady(nComp int) {
+type qrandQuantity struct {
+	randGen
+	nComp      int
+	distType   int
+	mean       float32
+	stddev     float32
+	updateMode int
+}
+
+func (q *qrandQuantity) update() {
+
+	r := &q.randGen
+
+	// --- init generator ---
 	if r.generator == 0 {
 		r.generator = curand.CreateGenerator(curand.PSEUDO_DEFAULT)
 		r.generator.SetSeed(r.seed)
 	}
+
+	// --- allocate buffer ---
 	if r.noise == nil {
-		r.noise = cuda.NewSlice(nComp, Mesh().Size())
+		r.noise = cuda.NewSlice(q.nComp, Mesh().Size())
 		r.step = -1
 	}
-}
 
-// ============================================================
-// 🔁 Policies
-// ============================================================
-
-type refreshPolicy func(lastStep, currentStep int) bool
-
-func refreshEveryStep(last, current int) bool {
-	return last != current
-}
-
-func refreshOnce(last, current int) bool {
-	return last < 0
-}
-
-// ============================================================
-// 🎲 Generic random quantity
-// ============================================================
-
-type qrandQuantity struct {
-	randGen
-	nComp  int
-	name   string
-	policy refreshPolicy
-	fill   func()
-}
-
-func (q *qrandQuantity) NComp() int   { return q.nComp }
-func (q *qrandQuantity) Name() string { return q.name }
-func (q *qrandQuantity) Unit() string { return "" }
-
-func (q *qrandQuantity) EvalTo(dst *data.Slice) {
-	q.update(NSteps, q.policy, q.fill)
-	data.Copy(dst, q.noise)
-}
-
-// unified update
-func (r *randGen) update(step int, policy refreshPolicy, refill func()) {
-
-	if r.noise == nil {
-		refill()
-		r.step = step
+	if (q.updateMode == 0 && r.step >= 0) || (q.updateMode == 1 && r.step == NSteps) {
 		return
 	}
 
-	if !policy(r.step, step) {
-		return
-	}
+	// ========================================================
+	// generation
+	// ========================================================
 
-	refill()
-	r.step = step
-}
+	N := int64(Mesh().NCell())
 
-// ============================================================
-// 🧪 Fill helpers
-// ============================================================
+	switch q.distType {
 
-func makeNormalFiller(r *randGen, nComp int, mean, stddev float32) func() {
-	return func() {
-		r.ensureReady(nComp)
-		N := int64(Mesh().NCell())
-		for c := 0; c < nComp; c++ {
-			r.generator.GenerateNormal(uintptr(r.noise.DevPtr(c)), N, mean, stddev)
+	// 0 = normal, 1 = uniform
+	// does 3 curand calls. maybe faster to do 1 call and transform the data on the GPU?
+	case 0:
+		for c := 0; c < q.nComp; c++ {
+			r.generator.GenerateNormal(uintptr(r.noise.DevPtr(c)), N, q.mean, q.stddev)
 		}
-	}
-}
-
-func makeUniformFiller(r *randGen, nComp int) func() {
-	return func() {
-		r.ensureReady(nComp)
-		N := int64(Mesh().NCell())
-		for c := 0; c < nComp; c++ {
+	case 1:
+		for c := 0; c < q.nComp; c++ {
 			r.generator.GenerateUniform(uintptr(r.noise.DevPtr(c)), N)
 		}
+	default:
+		panic(fmt.Sprintf("QrandGen: invalid distType %d", q.distType))
 	}
-}
 
-// ============================================================
-// 🎲 Single constructor
-// ============================================================
+	r.step = NSteps
+}
 
 func QrandGenNew(seed int, nComp int, distType int, updateMode int, mean, stddev float64) Quantity {
 
-	q := &qrandQuantity{
-		randGen: randGen{seed: int64(seed)},
-		nComp:   nComp,
+	return &qrandQuantity{
+		randGen:    randGen{seed: int64(seed), step: -1},
+		nComp:      nComp,
+		distType:   distType,
+		mean:       float32(mean),
+		stddev:     float32(stddev),
+		updateMode: updateMode,
 	}
+}
 
-	// -------------------------
-	// Distribution selection
-	// -------------------------
-
-	switch distType {
-	case DistNormal:
-		q.fill = makeNormalFiller(&q.randGen, nComp, float32(mean), float32(stddev))
-	case DistUniform:
-		q.fill = makeUniformFiller(&q.randGen, nComp)
-	default:
-		panic(fmt.Sprintf("QrandGen: unknown distType %d", distType))
-	}
-
-	// -------------------------
-	// Update policy
-	// -------------------------
-
-	switch updateMode {
-	case UpdateStatic:
-		q.policy = refreshOnce
-	case UpdateStep:
-		q.policy = refreshEveryStep
-	default:
-		panic(fmt.Sprintf("QrandGen: unknown updateMode %d", updateMode))
-	}
-
-	// -------------------------
-	// Naming (important for debugging)
-	// -------------------------
-
-	distStr := "unknown"
-	if distType == DistNormal {
-		distStr = "normal"
-	} else if distType == DistUniform {
-		distStr = "uniform"
-	}
-
-	updateStr := "unknown"
-	if updateMode == UpdateStatic {
-		updateStr = "static"
-	} else if updateMode == UpdateStep {
-		updateStr = "step"
-	}
-
-	if distType == DistNormal {
-		q.name = fmt.Sprintf("qrand_%s_%s_s%d_c%d_m%.2f_s%.2f",
-			distStr, updateStr, seed, nComp, mean, stddev)
-	} else {
-		q.name = fmt.Sprintf("qrand_%s_%s_s%d_c%d",
-			distStr, updateStr, seed, nComp)
-	}
-
-	return q
+func (q *qrandQuantity) NComp() int   { return q.nComp }
+func (q *qrandQuantity) Name() string { return "qrand" }
+func (q *qrandQuantity) Unit() string { return "" }
+func (q *qrandQuantity) EvalTo(dst *data.Slice) {
+	q.update()
+	data.Copy(dst, q.noise)
 }
