@@ -44,7 +44,7 @@ func (t *timeQuantity) EvalTo(dst *data.Slice) {
 	}
 }
 
-// functions of time as quantities:
+// functions of time as Quantities:
 
 type scalarFuncQuantity struct {
 	f script.ScalarFunction
