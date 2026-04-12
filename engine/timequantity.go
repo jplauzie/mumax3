@@ -24,6 +24,24 @@ var TimeQ_v = NewVectorField("TimeQVec", "s", "Simulation time (vector)", func(d
 	}
 })
 
+// A second potential implementation:
+
+/* type timeQuantity struct {
+	nComp int
+}
+
+var TimeQ_s Quantity = &timeQuantity{1}
+var TimeQ_v Quantity = &timeQuantity{3}
+
+func (t *timeQuantity) NComp() int { return t.nComp }
+
+func (t *timeQuantity) EvalTo(dst *data.Slice) {
+	v := float32(Time)
+	for c := 0; c < t.nComp; c++ {
+		cuda.Memset(dst.Comp(c), v)
+	}
+} */
+
 type scalarFuncQuantity struct {
 	f script.ScalarFunction
 }
