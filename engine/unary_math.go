@@ -27,9 +27,9 @@ func init() {
 	DeclFunc("Qerf", QErf, "Element-wise error function of a Quantity (scalar or vector)")
 	DeclFunc("Qerfc", QErfc, "Element-wise complementary error function of a Quantity (scalar or vector)")
 	DeclFunc("Qgamma", QGamma, "Element-wise gamma function of a Quantity (scalar or vector)")
-	DeclFunc("Qheaviside", QHeaviside, "Element-wise Heaviside step function of a Quantity (scalar or vector)")
+	DeclFunc("Qheaviside", QHeaviside, "Element-wise Heaviside step function of a Quantity (scalar or vector). Returns 0 for negative inputs, 1 for positive inputs, and 0.5 for zero.")
 	DeclFunc("Qsinc", QSinc, "Element-wise sinc function of a Quantity (scalar or vector)")
-	DeclFunc("Qpow", QPow, "Element-wise power: Qpow(base, exp)")
+	DeclFunc("Qpow", QPow, "Element-wise power: Qpow(base, exp). Supports fractional and negative powers, with the convention that for negative base and fractional exponent, the result is -pow(-base, exp), and for 0^0 returns 1.")
 	DeclFunc("Qmod", QMod, "Element-wise modulo: Qmod(a, b)")
 }
 
@@ -44,6 +44,7 @@ func (q *unaryFuncQuantity) NComp() int { return q.a.NComp() }
 func (q *unaryFuncQuantity) EvalTo(dst *data.Slice) {
 	a := ValueOf(q.a)
 	defer cuda.Recycle(a)
+	cuda.Zero(dst)
 	q.f(dst, a)
 }
 
@@ -67,15 +68,19 @@ func (q *binaryFuncQuantity) EvalTo(dst *data.Slice) {
 	defer cuda.Recycle(a)
 	b := ValueOf(q.b)
 	defer cuda.Recycle(b)
+	cuda.Zero(dst)
 
 	switch {
+	//vector-vector, scalar-scalar, or same number of components
 	case a.NComp() == b.NComp():
 		q.f(dst, a, b)
+		//vector-scalar
 	case a.NComp() == 1:
 		// broadcast a across each component
 		for c := 0; c < b.NComp(); c++ {
 			q.f(dst.Comp(c), a, b.Comp(c))
 		}
+		//vector-scalar
 	case b.NComp() == 1:
 		// broadcast b across each component
 		for c := 0; c < a.NComp(); c++ {
@@ -99,6 +104,9 @@ func newBinaryQ(a, b Quantity, f func(dst, a, b *data.Slice), name string) Quant
 	return &binaryFuncQuantity{a, b, nComp, f, name}
 }
 
+// each unary function returns a Quantity representing the function applied pointwise
+// for inputs outside of the function's domain, returns 0
+// limited domains for: tan poles at π/2 + nπ, acos: [-1, 1], acosh: [1, inf), asin: [-1, 1], atanh: (-1, 1), log: (0, inf), gamma: (0, inf) with poles at non-positive integers
 func QSin(a Quantity) Quantity       { return newUnaryQ(a, cuda.QSin, "Qsin") }
 func QCos(a Quantity) Quantity       { return newUnaryQ(a, cuda.QCos, "Qcos") }
 func QTan(a Quantity) Quantity       { return newUnaryQ(a, cuda.QTan, "Qtan") }
@@ -119,6 +127,11 @@ func QErfc(a Quantity) Quantity      { return newUnaryQ(a, cuda.QErfc, "Qerfc") 
 func QGamma(a Quantity) Quantity     { return newUnaryQ(a, cuda.QGamma, "Qgamma") }
 func QHeaviside(a Quantity) Quantity { return newUnaryQ(a, cuda.QHeaviside, "Qheaviside") }
 func QSinc(a Quantity) Quantity      { return newUnaryQ(a, cuda.QSinc, "Qsinc") }
-func QPow(a, b Quantity) Quantity    { return newBinaryQ(a, b, cuda.QPow, "Qpow") }
-func QMod(a, b Quantity) Quantity    { return newBinaryQ(a, b, cuda.QMod, "Qmod") }
-func QAtan2(y, x Quantity) Quantity  { return newBinaryQ(y, x, cuda.QAtan2, "Qatan2") }
+
+// each binary function returns a Quantity representing the function applied pointwise
+// for inputs outside of the function's domain, returns 0
+// pow(a,b), mod(a,b) and atan2(y,x)
+// pow(a,b) for negative a and b returns -pow(-a,b) for fractional exponents, and for 0^0 returns 1
+func QPow(a, b Quantity) Quantity   { return newBinaryQ(a, b, cuda.QPow, "Qpow") }
+func QMod(a, b Quantity) Quantity   { return newBinaryQ(a, b, cuda.QMod, "Qmod") }
+func QAtan2(y, x Quantity) Quantity { return newBinaryQ(y, x, cuda.QAtan2, "Qatan2") }
