@@ -1,11 +1,11 @@
 //dst[i] = heaviside(a[i])
 // returns 0 for x < 0, 0.5 for x == 0, 1 for x > 0
 extern "C" __global__ void
-Qheaviside(float* __restrict__ dst, float* __restrict__ src, int N) {
+unary_heaviside(float* __restrict__ dst, float* __restrict__ a, int N) {
     int i = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
 
     if (i < N) {
-        float x = src[i];
+        float x = a[i];
 
         if (x > 0.0f) {
             dst[i] = 1.0f;

@@ -1,6 +1,6 @@
 // dst[i] = pow(a[i], b[i]), pow(a,b) for negative a and b returns -pow(-a,b) for fractional exponents, and for 0^0 returns 1
 extern "C" __global__ void
-Qpow(float* __restrict__ dst, float* __restrict__ a, float* __restrict__ b, int N) {
+pw_pow(float* __restrict__ dst, float* __restrict__ a, float* __restrict__ b, int N) {
 int i = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
 
     if (i < N) {

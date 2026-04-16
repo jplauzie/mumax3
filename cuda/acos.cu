@@ -1,7 +1,7 @@
 // dst[i] = acos(a[i]), returns 0 for a[i] outside of domain [-1, 1]
 
 extern "C" __global__ void
-Qacos(float *__restrict__ dst, float *__restrict__ a, int N){
+unary_acos(float *__restrict__ dst, float *__restrict__ a, int N){
     int i = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
 
     if (i < N){

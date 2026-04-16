@@ -1,7 +1,7 @@
 // dst[i] = asin(a[i]), returns 0 for a[i] outside of domain [-1, 1]
 
 extern "C" __global__ void
-Qasin(float* __restrict__ dst, float* __restrict__ a, int N) {
+unary_asin(float* __restrict__ dst, float* __restrict__ a, int N) {
     int i = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
 
     if (i < N) {
