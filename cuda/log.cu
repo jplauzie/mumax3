@@ -1,10 +1,13 @@
-// dst[i] = log(a[i])
+// dst[i] = log(a[i]), returns 0 for non-positive input
 extern "C" __global__ void
-unary_log(float *__restrict__ dst, float *__restrict__ a, int N)
-{
+Qlog(float* __restrict__ dst, float* __restrict__ src, int N) {
     int i = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < N)
-    {
-        dst[i] = (a[i] > 0.0f) ? logf(a[i]) : 0.0f;
+
+    if (i < N) {
+        if (src[i] > 0.0f) {
+            dst[i] = logf(src[i]);
+        } else {
+            dst[i] = 0.0f;
+        }
     }
 }

@@ -1,11 +1,10 @@
 //dst[i] = asinh(a[i])
 
 extern "C" __global__ void
-unary_asinh(float *__restrict__ dst, float *__restrict__ a, int N)
-{
+unary_asinh(float *__restrict__ dst, float *__restrict__ a, int N){
     int i = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < N)
-    {
+    
+    if (i < N){
         dst[i] = asinhf(a[i]);
     }
 }
