@@ -1,15 +1,12 @@
 package engine
 
 import (
-	"fmt"
-
 	"math"
 
 	"github.com/mumax/3/cuda"
 	"github.com/mumax/3/cuda/curand"
 	"github.com/mumax/3/data"
 	"github.com/mumax/3/mag"
-	"github.com/mumax/3/util"
 )
 
 var (
@@ -20,7 +17,6 @@ var (
 )
 
 var AddThermalEnergyDensity = makeEdensAdder(&B_therm, -1)
-var PrintedWarningTempOddGrid = false // Will be set to true if the warning about odd temperature has been printed already, to avoid spam.
 
 // thermField calculates and caches thermal noise.
 type thermField struct {
@@ -91,15 +87,18 @@ func (b *thermField) update() {
 	}
 
 	N := Mesh().NCell()
-	if !PrintedWarningTempOddGrid && N%2 > 0 { // T is nonzero if we have gotten this far. As noted in issue #314, this means the grid size must be even.
-		PrintedWarningTempOddGrid = true
-		warnStr := "// WARNING: nonzero temperature requires an even amount of grid cells,\n" +
-			"//          but all axes have an odd number of cells: %v.\n" +
-			"//          This may cause a CURAND_STATUS_LENGTH_NOT_MULTIPLE error." // Error is likely when the largest factor is >127
-		util.Log(fmt.Sprintf(warnStr, Mesh().Size()))
-	}
+
+	// CURAND's GenerateNormal uses Box-Muller, which requires an even length. If N is odd, we allocate
+	// one extra float so CURAND is satisfied. The settemperature2 kernel guards
+	// on i < N (derived from B's size, not noise's size), so noise[N] is written but never read.
+	Npad := int64(N + (N % 2))
 	k2_VgammaDt := 2 * mag.Kb / (GammaLL * cellVolume() * Dt_si)
-	noise := cuda.Buffer(1, Mesh().Size())
+
+	// Use the exact mesh shape when N is already even (common case, no overhead), equivalent to Mesh().Size()
+	// When N is odd, use a flat [Npad,1,1] shape — the Cuda kernel only cares about
+	// the underlying pointer and the explicit N count, not the declared shape.
+	noise := cuda.Buffer(1, [3]int{int(Npad), 1, 1})
+
 	defer cuda.Recycle(noise)
 
 	const mean = 0
@@ -112,7 +111,7 @@ func (b *thermField) update() {
 	alpha := Alpha.MSlice()
 	defer alpha.Recycle()
 	for i := 0; i < 3; i++ {
-		b.generator.GenerateNormal(uintptr(noise.DevPtr(0)), int64(N), mean, stddev)
+		b.generator.GenerateNormal(uintptr(noise.DevPtr(0)), Npad, mean, stddev)
 		cuda.SetTemperature(dst.Comp(i), noise, k2_VgammaDt, ms, temp, alpha)
 	}
 
