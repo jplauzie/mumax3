@@ -28,8 +28,8 @@ type thermField struct {
 }
 
 func init() {
-	DeclFunc("ThermSeed", ThermSeed, "Deprecated: use NewThermSeed() instead.<br>ThermSeed() sets a random seed for thermal noise, but does not reset the RNG offset, yielding different noise even for the same seed. This function remains here to ensure backwards compatibility with mumax3.12 and earlier.")
-	DeclFunc("NewThermSeed", NewThermSeed, "Set a random seed for thermal noise")
+	DeclFunc("ThermSeed", ThermSeed, "Deprecated: use ThermReseed() instead.<br>ThermSeed() sets a random seed for thermal noise, but does not reset the RNG offset, yielding different noise even for the same seed. This function remains here to ensure backwards compatibility with mumax3.12 and earlier.")
+	DeclFunc("ThermReseed", ThermReseed, "Set a random seed for thermal noise")
 	registerEnergy(GetThermalEnergy, AddThermalEnergyDensity)
 	B_therm.step = -1 // invalidate noise cache
 	DeclROnly("B_therm", &B_therm, "Thermal field (T)")
@@ -130,7 +130,7 @@ func GetThermalEnergy() float64 {
 
 // Seeds the thermal noise generator
 func ThermSeed(seed int) {
-	warnStr := " WARNING: ThermSeed() is deprecated. Use NewThermSeed() instead.\n" + // First "//" gets added by LogOut()
+	warnStr := " WARNING: ThermSeed() is deprecated. Use ThermReseed() instead.\n" + // First "//" gets added by LogOut()
 		"//          (ThermSeed does not guarantee identical noise after each call\n" +
 		"//           because it only resets the RNG seed, not the RNG offset.)"
 	LogOut(warnStr)
@@ -140,7 +140,7 @@ func ThermSeed(seed int) {
 	}
 }
 
-func NewThermSeed(seed int) {
+func ThermReseed(seed int) {
 	B_therm.seed = int64(seed)
 	if B_therm.generator != 0 {
 		B_therm.generator.SetOffset(0)

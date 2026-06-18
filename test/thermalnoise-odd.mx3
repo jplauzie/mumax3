@@ -25,7 +25,7 @@ Alpha = 0.02
 Temp = 300
 FixDt = 1e-13
 
-NewThermSeed(SEED)
+ThermReseed(SEED)
 steps(1)
 B_therm.EvalTo(s)
 
@@ -43,7 +43,7 @@ Nz = 2
 SetGridSize(3, 3, Nz) // N = 18, one axis even
 s = NewVectorMask(3, 3, Nz)
 
-NewThermSeed(SEED)
+ThermReseed(SEED)
 steps(1)
 B_therm.EvalTo(s)
 
