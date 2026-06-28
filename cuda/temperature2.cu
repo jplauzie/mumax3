@@ -17,4 +17,3 @@ settemperature2(float* __restrict__  B,      float* __restrict__ noise, float kB
         B[i] = noise[i] * sqrtf((kB2_VgammaDt * alpha * temp * invMs ));
     }
 }
-

@@ -1,15 +1,12 @@
 package engine
 
 import (
-	"fmt"
-
 	"math"
 
 	"github.com/mumax/3/cuda"
 	"github.com/mumax/3/cuda/curand"
 	"github.com/mumax/3/data"
 	"github.com/mumax/3/mag"
-	"github.com/mumax/3/util"
 )
 
 var (
@@ -46,8 +43,6 @@ func (b *thermField) AddTo(dst *data.Slice) {
 }
 
 func (b *thermField) update() {
-	// we need to fix the time step here because solver will not yet have done it before the first step.
-	// FixDt as an lvalue that sets Dt_si on change might be cleaner.
 	if FixDt != 0 {
 		Dt_si = FixDt
 	}
@@ -57,8 +52,7 @@ func (b *thermField) update() {
 		b.generator.SetSeed(b.seed)
 	}
 	if b.noise == nil {
-		b.noise = cuda.NewSlice(b.NComp(), b.Mesh().Size())
-		// when noise was (re-)allocated it's invalid for sure.
+		b.noise = cuda.NewPaddedNoiseSlice(b.NComp(), b.Mesh().Size())
 		B_therm.step = -1
 		B_therm.dt = -1
 	}
@@ -70,12 +64,10 @@ func (b *thermField) update() {
 		return
 	}
 
-	// keep constant during time step
 	if NSteps == b.step && Dt_si == b.dt {
 		return
 	}
 
-	// after a bad step the timestep is rescaled and the noise should be rescaled accordingly, instead of redrawing the random numbers
 	if NSteps == b.step && Dt_si != b.dt {
 		for c := 0; c < 3; c++ {
 			cuda.Madd2(b.noise.Comp(c), b.noise.Comp(c), b.noise.Comp(c), float32(math.Sqrt(b.dt/Dt_si)), 0.)
@@ -86,25 +78,25 @@ func (b *thermField) update() {
 
 	if FixDt == 0 {
 		Refer("leliaert2017")
-		//uncomment to not allow adaptive step
-		//util.Fatal("Finite temperature requires fixed time step. Set FixDt != 0.")
 	}
 
 	N := Mesh().NCell()
-	if !PrintedWarningTempOddGrid && N%2 > 0 { // T is nonzero if we have gotten this far. As noted in issue #314, this means the grid size must be even.
-		PrintedWarningTempOddGrid = true
-		warnStr := "// WARNING: nonzero temperature requires an even amount of grid cells,\n" +
-			"//          but all axes have an odd number of cells: %v.\n" +
-			"//          This may cause a CURAND_STATUS_LENGTH_NOT_MULTIPLE error." // Error is likely when the largest factor is >127
-		util.Log(fmt.Sprintf(warnStr, Mesh().Size()))
-	}
+
+	// CURAND's GenerateNormal uses Box-Muller, which consumes values in pairs
+	// and therefore requires an even element count. If N is odd, we allocate
+	// one extra float so CURAND is satisfied. The settemperature2 kernel guards
+	// on i < N (derived from B's size), so noise[N] is written but never read.
+	Npad := int64(N + (N & 1))
+
 	k2_VgammaDt := 2 * mag.Kb / (GammaLL * cellVolume() * Dt_si)
-	noise := cuda.Buffer(1, Mesh().Size())
-	defer cuda.Recycle(noise)
+
+	// Use the exact mesh shape when N is already even (common case, no overhead).
+	// When N is odd, use a flat [Npad,1,1] shape — the kernel only cares about
+	// the underlying pointer and the explicit N count, not the declared shape.
 
 	const mean = 0
 	const stddev = 1
-	dst := b.noise
+
 	ms := Msat.MSlice()
 	defer ms.Recycle()
 	temp := Temp.MSlice()
@@ -112,8 +104,18 @@ func (b *thermField) update() {
 	alpha := Alpha.MSlice()
 	defer alpha.Recycle()
 	for i := 0; i < 3; i++ {
-		b.generator.GenerateNormal(uintptr(noise.DevPtr(0)), int64(N), mean, stddev)
-		cuda.SetTemperature(dst.Comp(i), noise, k2_VgammaDt, ms, temp, alpha)
+		b.generator.GenerateNormal(
+			uintptr(b.noise.Comp(i).DevPtr(0)),
+			Npad,
+			mean,
+			stddev,
+		)
+		cuda.SetTemperature(
+			b.noise.Comp(i),
+			b.noise.Comp(i), // same pointer — in-place scaling
+			k2_VgammaDt,
+			ms, temp, alpha,
+		)
 	}
 
 	b.step = NSteps

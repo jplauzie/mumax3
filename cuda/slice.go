@@ -32,6 +32,23 @@ func newSlice(nComp int, size [3]int, alloc func(int64) unsafe.Pointer, memType 
 	return data.SliceFromPtrs(size, memType, ptrs)
 }
 
+// NewPaddedNoiseSlice allocates a slice whose components each have one extra
+// element of backing memory when N is odd, giving CURAND a safe write target
+// for the Box-Muller padding value. The reported size is always size, so all
+// other kernels (Add, Madd2, etc.) see exactly N elements.
+func NewPaddedNoiseSlice(nComp int, size [3]int) *data.Slice {
+	N := size[0] * size[1] * size[2]
+	Nalloc := N + (N & 1) // N+1 for odd N, N for even N
+	bytes := int64(Nalloc) * cu.SIZEOF_FLOAT32
+	ptrs := make([]unsafe.Pointer, nComp)
+	for c := range ptrs {
+		ptr := cu.MemAlloc(bytes)
+		cu.MemsetD32(ptr, 0, int64(Nalloc))
+		ptrs[c] = unsafe.Pointer(uintptr(ptr))
+	}
+	return data.SliceFromPtrs(size, data.GPUMemory, ptrs)
+}
+
 // wrappers for data.EnableGPU arguments
 
 func memFree(ptr unsafe.Pointer) { cu.MemFree(cu.DevicePtr(uintptr(ptr))) }
