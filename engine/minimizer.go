@@ -76,31 +76,41 @@ func (mini *Minimizer) Step() {
 	defer cuda.Recycle(m0)
 	data.Copy(m0, m)
 
-	// make descent
+	// perform minimization step
 	cuda.Minimize(m, m0, k, h)
 
-	// calculate new torque for next step
+	// save previous torque
 	k0 := cuda.Buffer(3, size)
 	defer cuda.Recycle(k0)
 	data.Copy(k0, k)
-	torqueFn(k)
-	setMaxTorque(k) // report to user
 
-	// just to make the following readable
+	// compute new torque
+	torqueFn(k)
+	setMaxTorque(k)
+
+	// -----------------------------------------
+	// BB secant pairs (DO NOT CHANGE THIS PART)
+	// -----------------------------------------
+
 	dm := m0
 	dk := k0
 
-	// calculate step difference of m and k
+	// actual displacements
 	cuda.Madd2(dm, m, m0, 1., -1.)
-	cuda.Madd2(dk, k, k0, -1., 1.) // reversed due to LLNoPrecess sign
+	cuda.Madd2(dk, k, k0, -1., 1.)
 
-	// get maxdiff and add to list
-	max_dm := cuda.MaxVecNorm(dm)
-	mini.lastDm.Add(max_dm)
-	setLastErr(mini.lastDm.Max()) // report maxDm to user as LastErr
+	// -----------------------------------------
+	// VECTOR TRANSPORT (ONLY dk)
+	// -----------------------------------------
 
-	// adjust next time step
+	cuda.TransportTangent(dk, m0, m)
+
+	// -----------------------------------------
+	// BB STEP SIZE
+	// -----------------------------------------
+
 	var nom, div float32
+
 	if NSteps%2 == 0 {
 		nom = cuda.Dot(dm, dm)
 		div = cuda.Dot(dm, dk)
@@ -108,15 +118,18 @@ func (mini *Minimizer) Step() {
 		nom = cuda.Dot(dm, dk)
 		div = cuda.Dot(dk, dk)
 	}
-	if div != 0. {
+
+	if div != 0 {
 		mini.h = nom / div
-	} else { // in case of division by zero
+	} else {
 		mini.h = 1e-4
 	}
 
 	M.normalize()
 
-	// as a convention, time does not advance during relax
+	mini.lastDm.Add(cuda.MaxVecNorm(dm))
+	setLastErr(mini.lastDm.Max())
+
 	NSteps++
 }
 
