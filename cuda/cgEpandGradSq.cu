@@ -65,7 +65,7 @@ cgEpAndGradSq(
     }
     blockReduce2_df(ep, gsq, sep, sgsq, nwarps);
     if (threadIdx.x == 0) {
-        atomicAdd(g_ep,  (float)ep);
-        atomicAdd(g_gsq, (float)gsq);
+        atomicAdd((double*)g_ep,  ep);
+        atomicAdd((double*)g_gsq, gsq);
     }
 }

@@ -9,7 +9,6 @@
 package cuda
 
 import (
-	"fmt"
 	"math"
 	"unsafe"
 
@@ -87,24 +86,21 @@ func CgSpinStep(dst, src, dir *data.Slice, t0sq, dvecScale float32) {
 //
 // ms must be a 1-component Slice holding Ms values per cell.
 // tsq = current offset².
-func CgEpAndGradSq(mxHxm, dir, ms *data.Slice, tsq float32) (ep, gsq float32) {
+func CgEpAndGradSq(mxHxm, dir, ms *data.Slice, tsq float32) (ep, gsq float64) {
 	N := mxHxm.Len()
 	cfg := cgConf(N)
-
-	epBuf := scalarGPU()
-	gsqBuf := scalarGPU()
-	defer Recycle(epBuf)
-	defer Recycle(gsqBuf)
-
+	epBuf := doubleScalarGPU()
+	gsqBuf := doubleScalarGPU()
+	defer recycleDoubleScalar(epBuf)
+	defer recycleDoubleScalar(gsqBuf)
 	k_cgEpAndGradSq_async(
-		epBuf.DevPtr(0), gsqBuf.DevPtr(0),
+		epBuf, gsqBuf,
 		mxHxm.DevPtr(X), mxHxm.DevPtr(Y), mxHxm.DevPtr(Z),
 		dir.DevPtr(X), dir.DevPtr(Y), dir.DevPtr(Z),
 		ms.DevPtr(0),
 		tsq, N, cfg)
-
-	ep = readScalar(epBuf)
-	gsq = readScalar(gsqBuf)
+	ep = readDoubleScalar(epBuf)
+	gsq = readDoubleScalar(gsqBuf)
 	return
 }
 
@@ -112,10 +108,10 @@ func CgEpAndGradSq(mxHxm, dir, ms *data.Slice, tsq float32) (ep, gsq float32) {
 
 // CgUpdateDirResult holds the scalar statistics returned by CgUpdateDir.
 type CgUpdateDirResult struct {
-	MaxMagSq  float32 // max_i |dir[i]|²  (sup-norm²)
-	NormSumSq float32 // Σ_i  |dir[i]|²   (L2-norm²)
-	Ep        float32 // Σ_i  (dir[i]·mxHxm[i]) * msv[i]  (before -mu0*V)
-	GradSumSq float32 // Σ_i  |mxHxm[i]|² * msv[i]²
+	MaxMagSq  float32
+	NormSumSq float32
+	Ep        float64 // ← float64
+	GradSumSq float64 // ← float64
 }
 
 // CgUpdateDir performs the in-place CG direction update:
@@ -125,19 +121,18 @@ type CgUpdateDirResult struct {
 //
 // Pass gamma=0 to reset the direction to the preconditioned gradient.
 // msv is a 1-component Slice of Ms*cellVolume per cell.
+
 func CgUpdateDir(dir, mxHxm, spin, msv *data.Slice, gamma float32) CgUpdateDirResult {
 	N := dir.Len()
 	cfg := cgConf(N)
-
 	mmBuf := scalarGPU()
 	nsBuf := scalarGPU()
-	epBuf := scalarGPU()
-	gsBuf := scalarGPU()
+	epBuf := doubleScalarGPU() // ← double buffer
+	gsBuf := doubleScalarGPU() // ← double buffer
 	defer Recycle(mmBuf)
 	defer Recycle(nsBuf)
-	defer Recycle(epBuf)
-	defer Recycle(gsBuf)
-
+	defer recycleDoubleScalar(epBuf)
+	defer recycleDoubleScalar(gsBuf)
 	k_cgUpdateDir_async(
 		dir.DevPtr(X), dir.DevPtr(Y), dir.DevPtr(Z),
 		mxHxm.DevPtr(X), mxHxm.DevPtr(Y), mxHxm.DevPtr(Z),
@@ -145,71 +140,62 @@ func CgUpdateDir(dir, mxHxm, spin, msv *data.Slice, gamma float32) CgUpdateDirRe
 		msv.DevPtr(0),
 		gamma,
 		mmBuf.DevPtr(0), nsBuf.DevPtr(0),
-		epBuf.DevPtr(0), gsBuf.DevPtr(0),
+		epBuf, // unsafe.Pointer to double GPU buffer
+		gsBuf,
 		N, cfg)
-	fmt.Printf("CgUpdateDir: N=%d  cfg=%+v\n", N, cfg)
-
 	raw := CgUpdateDirResult{
 		MaxMagSq:  readScalar(mmBuf),
 		NormSumSq: readScalar(nsBuf),
-		Ep:        readScalar(epBuf),
-		GradSumSq: readScalar(gsBuf),
+		Ep:        readDoubleScalar(epBuf),
+		GradSumSq: readDoubleScalar(gsBuf),
 	}
-	fmt.Printf("CgUpdateDir RAW results: MaxMagSq=%e NormSumSq=%e Ep=%e GradSumSq=%e gamma=%e\n",
-		raw.MaxMagSq, raw.NormSumSq, raw.Ep, raw.GradSumSq, gamma)
 	return raw
-
 }
 
 // ---- CgGSumSqFR ----------------------------------------------------------
 
 // CgGSumSqFR returns Σ_i msv[i]² * |mxHxm[i]|².
 // Used to compute the Fletcher-Reeves gamma denominator / new numerator.
-func CgGSumSqFR(mxHxm, msv *data.Slice) float32 {
+func CgGSumSqFR(mxHxm, msv *data.Slice) float64 {
 	N := mxHxm.Len()
 	cfg := cgConf(N)
-
-	outBuf := scalarGPU()
-	defer Recycle(outBuf)
-
+	outBuf := doubleScalarGPU()
+	defer recycleDoubleScalar(outBuf)
 	k_cgGSumSqFR_async(
-		outBuf.DevPtr(0),
+		outBuf,
 		mxHxm.DevPtr(X), mxHxm.DevPtr(Y), mxHxm.DevPtr(Z),
 		msv.DevPtr(0),
 		N, cfg)
-
-	return readScalar(outBuf)
+	return readDoubleScalar(outBuf)
 }
 
 // ---- CgGammaPR -----------------------------------------------------------
 
 // CgGammaPRResult holds both outputs of the Polak-Ribière accumulation.
-type CgGammaPRResult struct {
-	GSumSq   float32 // Σ_i msv² |cur|²               (new gradient norm²)
-	GammaSum float32 // Σ_i msv² (cur-prev)·cur         (PR numerator)
-}
 
 // CgGammaPR computes the Polak-Ribière gamma numerator and new g_sum_sq,
 // and updates prevMxHxm in-place to the current mxHxm.
+type CgGammaPRResult struct {
+	GSumSq   float64
+	GammaSum float64
+}
+
 func CgGammaPR(curMxHxm, prevMxHxm, msv *data.Slice) CgGammaPRResult {
 	N := curMxHxm.Len()
 	cfg := cgConf(N)
-
-	gsBuf := scalarGPU()
-	gmBuf := scalarGPU()
-	defer Recycle(gsBuf)
-	defer Recycle(gmBuf)
-
+	gsBuf := doubleScalarGPU()
+	gmBuf := doubleScalarGPU()
+	defer recycleDoubleScalar(gsBuf)
+	defer recycleDoubleScalar(gmBuf)
 	k_cgGammaPR_async(
-		gsBuf.DevPtr(0), gmBuf.DevPtr(0),
+		gsBuf, gmBuf,
 		curMxHxm.DevPtr(X), curMxHxm.DevPtr(Y), curMxHxm.DevPtr(Z),
 		prevMxHxm.DevPtr(X), prevMxHxm.DevPtr(Y), prevMxHxm.DevPtr(Z),
 		msv.DevPtr(0),
 		N, cfg)
-
 	return CgGammaPRResult{
-		GSumSq:   readScalar(gsBuf),
-		GammaSum: readScalar(gmBuf),
+		GSumSq:   readDoubleScalar(gsBuf),
+		GammaSum: readDoubleScalar(gmBuf),
 	}
 }
 

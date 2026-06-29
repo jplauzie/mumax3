@@ -30,8 +30,8 @@ type cgUpdateDir_args_t struct{
 	 arg_gamma float32
 	 arg_g_maxmagsq unsafe.Pointer
 	 arg_g_normsumsq unsafe.Pointer
-	 arg_g_ep unsafe.Pointer
-	 arg_g_gradsumsq unsafe.Pointer
+	 arg_g_ep_raw unsafe.Pointer
+	 arg_g_gradsumsq_raw unsafe.Pointer
 	 arg_N int
 	 argptr [16]unsafe.Pointer
 	sync.Mutex
@@ -55,13 +55,13 @@ func init(){
 	 cgUpdateDir_args.argptr[10] = unsafe.Pointer(&cgUpdateDir_args.arg_gamma)
 	 cgUpdateDir_args.argptr[11] = unsafe.Pointer(&cgUpdateDir_args.arg_g_maxmagsq)
 	 cgUpdateDir_args.argptr[12] = unsafe.Pointer(&cgUpdateDir_args.arg_g_normsumsq)
-	 cgUpdateDir_args.argptr[13] = unsafe.Pointer(&cgUpdateDir_args.arg_g_ep)
-	 cgUpdateDir_args.argptr[14] = unsafe.Pointer(&cgUpdateDir_args.arg_g_gradsumsq)
+	 cgUpdateDir_args.argptr[13] = unsafe.Pointer(&cgUpdateDir_args.arg_g_ep_raw)
+	 cgUpdateDir_args.argptr[14] = unsafe.Pointer(&cgUpdateDir_args.arg_g_gradsumsq_raw)
 	 cgUpdateDir_args.argptr[15] = unsafe.Pointer(&cgUpdateDir_args.arg_N)
 	 }
 
 // Wrapper for cgUpdateDir CUDA kernel, asynchronous.
-func k_cgUpdateDir_async ( dirx unsafe.Pointer, diry unsafe.Pointer, dirz unsafe.Pointer, mhx unsafe.Pointer, mhy unsafe.Pointer, mhz unsafe.Pointer, spx unsafe.Pointer, spy unsafe.Pointer, spz unsafe.Pointer, msv unsafe.Pointer, gamma float32, g_maxmagsq unsafe.Pointer, g_normsumsq unsafe.Pointer, g_ep unsafe.Pointer, g_gradsumsq unsafe.Pointer, N int,  cfg *config) {
+func k_cgUpdateDir_async ( dirx unsafe.Pointer, diry unsafe.Pointer, dirz unsafe.Pointer, mhx unsafe.Pointer, mhy unsafe.Pointer, mhz unsafe.Pointer, spx unsafe.Pointer, spy unsafe.Pointer, spz unsafe.Pointer, msv unsafe.Pointer, gamma float32, g_maxmagsq unsafe.Pointer, g_normsumsq unsafe.Pointer, g_ep_raw unsafe.Pointer, g_gradsumsq_raw unsafe.Pointer, N int,  cfg *config) {
 	if Synchronous{ // debug
 		Sync()
 		timer.Start("cgUpdateDir")
@@ -87,8 +87,8 @@ func k_cgUpdateDir_async ( dirx unsafe.Pointer, diry unsafe.Pointer, dirz unsafe
 	 cgUpdateDir_args.arg_gamma = gamma
 	 cgUpdateDir_args.arg_g_maxmagsq = g_maxmagsq
 	 cgUpdateDir_args.arg_g_normsumsq = g_normsumsq
-	 cgUpdateDir_args.arg_g_ep = g_ep
-	 cgUpdateDir_args.arg_g_gradsumsq = g_gradsumsq
+	 cgUpdateDir_args.arg_g_ep_raw = g_ep_raw
+	 cgUpdateDir_args.arg_g_gradsumsq_raw = g_gradsumsq_raw
 	 cgUpdateDir_args.arg_N = N
 	
 
@@ -134,9 +134,9 @@ const(
 )
 {
 	.reg .pred 	%p<68>;
-	.reg .f32 	%f<109>;
+	.reg .f32 	%f<105>;
 	.reg .b32 	%r<168>;
-	.reg .f64 	%fd<81>;
+	.reg .f64 	%fd<83>;
 	.reg .b64 	%rd<43>;
 	// demoted variable
 	.shared .align 4 .b8 _ZZ11cgUpdateDirE3smm[128];
@@ -171,9 +171,9 @@ const(
 	mov.u32 	%r2, %tid.x;
 	mad.lo.s32 	%r3, %r9, %r1, %r2;
 	setp.ge.s32 	%p1, %r3, %r5;
-	mov.f64 	%fd75, 0d0000000000000000;
-	mov.f32 	%f104, 0f00000000;
-	mov.f64 	%fd76, %fd75;
+	mov.f64 	%fd77, 0d0000000000000000;
+	mov.f32 	%f100, 0f00000000;
+	mov.f64 	%fd78, %fd77;
 	@%p1 bra 	$L__BB0_6;
 
 	cvta.to.global.u64 	%rd19, %rd14;
@@ -182,41 +182,41 @@ const(
 	add.s64 	%rd21, %rd19, %rd20;
 	ld.global.f32 	%f1, [%rd21];
 	setp.eq.f32 	%p2, %f1, 0f00000000;
-	mov.f32 	%f104, 0f00000000;
+	mov.f32 	%f100, 0f00000000;
 	cvta.to.global.u64 	%rd22, %rd5;
 	add.s64 	%rd2, %rd22, %rd20;
 	cvta.to.global.u64 	%rd23, %rd6;
 	add.s64 	%rd3, %rd23, %rd20;
 	cvta.to.global.u64 	%rd24, %rd7;
 	add.s64 	%rd4, %rd24, %rd20;
-	mov.f64 	%fd75, 0d0000000000000000;
-	mov.f32 	%f101, %f104;
-	mov.f32 	%f102, %f104;
-	mov.f32 	%f103, %f104;
+	mov.f64 	%fd77, 0d0000000000000000;
+	mov.f32 	%f97, %f100;
+	mov.f32 	%f98, %f100;
+	mov.f32 	%f99, %f100;
 	@%p2 bra 	$L__BB0_5;
 
 	cvta.to.global.u64 	%rd25, %rd8;
 	shl.b64 	%rd26, %rd1, 2;
 	add.s64 	%rd27, %rd25, %rd26;
 	ld.global.f32 	%f2, [%rd27];
-	mul.f32 	%f97, %f1, %f2;
+	mul.f32 	%f93, %f1, %f2;
 	cvta.to.global.u64 	%rd28, %rd9;
 	add.s64 	%rd29, %rd28, %rd26;
 	ld.global.f32 	%f4, [%rd29];
-	mul.f32 	%f98, %f1, %f4;
+	mul.f32 	%f94, %f1, %f4;
 	cvta.to.global.u64 	%rd30, %rd10;
 	add.s64 	%rd31, %rd30, %rd26;
 	ld.global.f32 	%f6, [%rd31];
-	mul.f32 	%f99, %f1, %f6;
+	mul.f32 	%f95, %f1, %f6;
 	setp.eq.f32 	%p3, %f33, 0f00000000;
 	@%p3 bra 	$L__BB0_4;
 
 	ld.global.f32 	%f39, [%rd2];
-	fma.rn.f32 	%f97, %f39, %f33, %f97;
+	fma.rn.f32 	%f93, %f39, %f33, %f93;
 	ld.global.f32 	%f40, [%rd3];
-	fma.rn.f32 	%f98, %f40, %f33, %f98;
+	fma.rn.f32 	%f94, %f40, %f33, %f94;
 	ld.global.f32 	%f41, [%rd4];
-	fma.rn.f32 	%f99, %f41, %f33, %f99;
+	fma.rn.f32 	%f95, %f41, %f33, %f95;
 
 $L__BB0_4:
 	cvta.to.global.u64 	%rd32, %rd11;
@@ -225,24 +225,24 @@ $L__BB0_4:
 	cvta.to.global.u64 	%rd35, %rd12;
 	add.s64 	%rd36, %rd35, %rd26;
 	ld.global.f32 	%f43, [%rd36];
-	mul.f32 	%f44, %f98, %f43;
-	fma.rn.f32 	%f45, %f97, %f42, %f44;
+	mul.f32 	%f44, %f94, %f43;
+	fma.rn.f32 	%f45, %f93, %f42, %f44;
 	cvta.to.global.u64 	%rd37, %rd13;
 	add.s64 	%rd38, %rd37, %rd26;
 	ld.global.f32 	%f46, [%rd38];
-	fma.rn.f32 	%f47, %f99, %f46, %f45;
+	fma.rn.f32 	%f47, %f95, %f46, %f45;
 	mul.f32 	%f48, %f42, %f47;
-	sub.f32 	%f101, %f97, %f48;
+	sub.f32 	%f97, %f93, %f48;
 	mul.f32 	%f49, %f43, %f47;
-	sub.f32 	%f102, %f98, %f49;
+	sub.f32 	%f98, %f94, %f49;
 	mul.f32 	%f50, %f46, %f47;
-	sub.f32 	%f103, %f99, %f50;
-	mul.f32 	%f51, %f102, %f102;
-	fma.rn.f32 	%f52, %f101, %f101, %f51;
-	fma.rn.f32 	%f104, %f103, %f103, %f52;
-	cvt.f64.f32 	%fd21, %f101;
-	cvt.f64.f32 	%fd22, %f102;
-	cvt.f64.f32 	%fd23, %f103;
+	sub.f32 	%f99, %f95, %f50;
+	mul.f32 	%f51, %f98, %f98;
+	fma.rn.f32 	%f52, %f97, %f97, %f51;
+	fma.rn.f32 	%f100, %f99, %f99, %f52;
+	cvt.f64.f32 	%fd21, %f97;
+	cvt.f64.f32 	%fd22, %f98;
+	cvt.f64.f32 	%fd23, %f99;
 	cvt.f64.f32 	%fd24, %f2;
 	cvt.f64.f32 	%fd25, %f4;
 	mul.f64 	%fd26, %fd25, %fd22;
@@ -250,27 +250,27 @@ $L__BB0_4:
 	cvt.f64.f32 	%fd28, %f6;
 	fma.rn.f64 	%fd29, %fd28, %fd23, %fd27;
 	cvt.f64.f32 	%fd30, %f1;
-	mul.f64 	%fd75, %fd29, %fd30;
+	mul.f64 	%fd77, %fd29, %fd30;
 	mul.f64 	%fd31, %fd25, %fd25;
 	fma.rn.f64 	%fd32, %fd24, %fd24, %fd31;
 	fma.rn.f64 	%fd33, %fd28, %fd28, %fd32;
 	mul.f64 	%fd34, %fd30, %fd30;
-	mul.f64 	%fd76, %fd34, %fd33;
+	mul.f64 	%fd78, %fd34, %fd33;
 
 $L__BB0_5:
-	st.global.f32 	[%rd2], %f101;
-	st.global.f32 	[%rd3], %f102;
-	st.global.f32 	[%rd4], %f103;
+	st.global.f32 	[%rd2], %f97;
+	st.global.f32 	[%rd3], %f98;
+	st.global.f32 	[%rd4], %f99;
 
 $L__BB0_6:
-	mov.b32 	%r10, %f104;
+	mov.b32 	%r10, %f100;
 	mov.u32 	%r11, 2;
 	mov.u32 	%r12, 31;
 	mov.u32 	%r13, 16;
 	mov.u32 	%r14, -1;
 	shfl.sync.down.b32 	%r15|%p4, %r10, %r13, %r12, %r14;
 	mov.b32 	%f53, %r15;
-	max.f32 	%f54, %f104, %f53;
+	max.f32 	%f54, %f100, %f53;
 	mov.b32 	%r16, %f54;
 	mov.u32 	%r17, 8;
 	shfl.sync.down.b32 	%r18|%p5, %r16, %r17, %r12, %r14;
@@ -292,7 +292,7 @@ $L__BB0_6:
 	max.f32 	%f23, %f60, %f61;
 	shfl.sync.down.b32 	%r27|%p9, %r10, %r13, %r12, %r14;
 	mov.b32 	%f62, %r27;
-	add.f32 	%f63, %f104, %f62;
+	add.f32 	%f63, %f100, %f62;
 	mov.b32 	%r28, %f63;
 	shfl.sync.down.b32 	%r29|%p10, %r28, %r17, %r12, %r14;
 	mov.b32 	%f64, %r29;
@@ -311,16 +311,16 @@ $L__BB0_6:
 	add.f32 	%f24, %f69, %f70;
 	{
 	.reg .b32 %temp; 
-	mov.b64 	{%r36, %temp}, %fd75;
+	mov.b64 	{%r36, %temp}, %fd77;
 	}
 	shfl.sync.down.b32 	%r37|%p14, %r36, %r13, %r12, %r14;
 	{
 	.reg .b32 %temp; 
-	mov.b64 	{%temp, %r38}, %fd75;
+	mov.b64 	{%temp, %r38}, %fd77;
 	}
 	shfl.sync.down.b32 	%r39|%p15, %r38, %r13, %r12, %r14;
 	mov.b64 	%fd35, {%r37, %r39};
-	add.f64 	%fd36, %fd75, %fd35;
+	add.f64 	%fd36, %fd77, %fd35;
 	{
 	.reg .b32 %temp; 
 	mov.b64 	{%r40, %temp}, %fd36;
@@ -371,16 +371,16 @@ $L__BB0_6:
 	add.f64 	%fd7, %fd42, %fd43;
 	{
 	.reg .b32 %temp; 
-	mov.b64 	{%r56, %temp}, %fd76;
+	mov.b64 	{%r56, %temp}, %fd78;
 	}
 	shfl.sync.down.b32 	%r57|%p24, %r56, %r13, %r12, %r14;
 	{
 	.reg .b32 %temp; 
-	mov.b64 	{%temp, %r58}, %fd76;
+	mov.b64 	{%temp, %r58}, %fd78;
 	}
 	shfl.sync.down.b32 	%r59|%p25, %r58, %r13, %r12, %r14;
 	mov.b64 	%fd44, {%r57, %r59};
-	add.f64 	%fd45, %fd76, %fd44;
+	add.f64 	%fd45, %fd78, %fd44;
 	{
 	.reg .b32 %temp; 
 	mov.b64 	{%r60, %temp}, %fd45;
@@ -454,39 +454,39 @@ $L__BB0_8:
 	add.s32 	%r87, %r1, 31;
 	shr.u32 	%r88, %r87, 5;
 	setp.ge.u32 	%p35, %r2, %r88;
-	mov.f64 	%fd79, 0d0000000000000000;
-	mov.f32 	%f107, 0f00000000;
-	mov.f32 	%f108, %f107;
-	mov.f64 	%fd80, %fd79;
+	mov.f64 	%fd81, 0d0000000000000000;
+	mov.f32 	%f103, 0f00000000;
+	mov.f32 	%f104, %f103;
+	mov.f64 	%fd82, %fd81;
 	@%p35 bra 	$L__BB0_10;
 
 	shl.b32 	%r89, %r2, 2;
 	mov.u32 	%r90, _ZZ11cgUpdateDirE3smm;
 	add.s32 	%r91, %r90, %r89;
-	ld.shared.f32 	%f107, [%r91];
+	ld.shared.f32 	%f103, [%r91];
 	mov.u32 	%r92, _ZZ11cgUpdateDirE3sns;
 	add.s32 	%r93, %r92, %r89;
-	ld.shared.f32 	%f108, [%r93];
+	ld.shared.f32 	%f104, [%r93];
 	shl.b32 	%r94, %r2, 3;
 	mov.u32 	%r95, _ZZ11cgUpdateDirE3sep;
 	add.s32 	%r96, %r95, %r94;
-	ld.shared.f64 	%fd79, [%r96];
+	ld.shared.f64 	%fd81, [%r96];
 	mov.u32 	%r97, _ZZ11cgUpdateDirE3sgs;
 	add.s32 	%r98, %r97, %r94;
-	ld.shared.f64 	%fd80, [%r98];
+	ld.shared.f64 	%fd82, [%r98];
 
 $L__BB0_10:
 	setp.ne.s32 	%p36, %r4, 0;
 	@%p36 bra 	$L__BB0_12;
 
-	mov.b32 	%r99, %f107;
+	mov.b32 	%r99, %f103;
 	mov.u32 	%r100, 2;
 	mov.u32 	%r101, 31;
 	mov.u32 	%r102, 16;
 	mov.u32 	%r103, -1;
 	shfl.sync.down.b32 	%r104|%p37, %r99, %r102, %r101, %r103;
 	mov.b32 	%f73, %r104;
-	max.f32 	%f74, %f107, %f73;
+	max.f32 	%f74, %f103, %f73;
 	mov.b32 	%r105, %f74;
 	mov.u32 	%r106, 8;
 	shfl.sync.down.b32 	%r107|%p38, %r105, %r106, %r101, %r103;
@@ -505,11 +505,11 @@ $L__BB0_10:
 	mov.u32 	%r114, 1;
 	shfl.sync.down.b32 	%r115|%p41, %r113, %r114, %r101, %r103;
 	mov.b32 	%f81, %r115;
-	max.f32 	%f107, %f80, %f81;
-	mov.b32 	%r116, %f108;
+	max.f32 	%f103, %f80, %f81;
+	mov.b32 	%r116, %f104;
 	shfl.sync.down.b32 	%r117|%p42, %r116, %r102, %r101, %r103;
 	mov.b32 	%f82, %r117;
-	add.f32 	%f83, %f108, %f82;
+	add.f32 	%f83, %f104, %f82;
 	mov.b32 	%r118, %f83;
 	shfl.sync.down.b32 	%r119|%p43, %r118, %r106, %r101, %r103;
 	mov.b32 	%f84, %r119;
@@ -525,19 +525,19 @@ $L__BB0_10:
 	mov.b32 	%r124, %f89;
 	shfl.sync.down.b32 	%r125|%p46, %r124, %r114, %r101, %r103;
 	mov.b32 	%f90, %r125;
-	add.f32 	%f108, %f89, %f90;
+	add.f32 	%f104, %f89, %f90;
 	{
 	.reg .b32 %temp; 
-	mov.b64 	{%r126, %temp}, %fd79;
+	mov.b64 	{%r126, %temp}, %fd81;
 	}
 	shfl.sync.down.b32 	%r127|%p47, %r126, %r102, %r101, %r103;
 	{
 	.reg .b32 %temp; 
-	mov.b64 	{%temp, %r128}, %fd79;
+	mov.b64 	{%temp, %r128}, %fd81;
 	}
 	shfl.sync.down.b32 	%r129|%p48, %r128, %r102, %r101, %r103;
 	mov.b64 	%fd55, {%r127, %r129};
-	add.f64 	%fd56, %fd79, %fd55;
+	add.f64 	%fd56, %fd81, %fd55;
 	{
 	.reg .b32 %temp; 
 	mov.b64 	{%r130, %temp}, %fd56;
@@ -585,19 +585,19 @@ $L__BB0_10:
 	}
 	shfl.sync.down.b32 	%r145|%p56, %r144, %r114, %r101, %r103;
 	mov.b64 	%fd63, {%r143, %r145};
-	add.f64 	%fd79, %fd62, %fd63;
+	add.f64 	%fd81, %fd62, %fd63;
 	{
 	.reg .b32 %temp; 
-	mov.b64 	{%r146, %temp}, %fd80;
+	mov.b64 	{%r146, %temp}, %fd82;
 	}
 	shfl.sync.down.b32 	%r147|%p57, %r146, %r102, %r101, %r103;
 	{
 	.reg .b32 %temp; 
-	mov.b64 	{%temp, %r148}, %fd80;
+	mov.b64 	{%temp, %r148}, %fd82;
 	}
 	shfl.sync.down.b32 	%r149|%p58, %r148, %r102, %r101, %r103;
 	mov.b64 	%fd64, {%r147, %r149};
-	add.f64 	%fd65, %fd80, %fd64;
+	add.f64 	%fd65, %fd82, %fd64;
 	{
 	.reg .b32 %temp; 
 	mov.b64 	{%r150, %temp}, %fd65;
@@ -645,24 +645,22 @@ $L__BB0_10:
 	}
 	shfl.sync.down.b32 	%r165|%p66, %r164, %r114, %r101, %r103;
 	mov.b64 	%fd72, {%r163, %r165};
-	add.f64 	%fd80, %fd71, %fd72;
+	add.f64 	%fd82, %fd71, %fd72;
 
 $L__BB0_12:
 	setp.ne.s32 	%p67, %r2, 0;
 	@%p67 bra 	$L__BB0_14;
 
 	cvta.to.global.u64 	%rd39, %rd15;
-	abs.f32 	%f91, %f107;
+	abs.f32 	%f91, %f103;
 	mov.b32 	%r166, %f91;
 	atom.global.max.u32 	%r167, [%rd39], %r166;
 	cvta.to.global.u64 	%rd40, %rd16;
-	atom.global.add.f32 	%f92, [%rd40], %f108;
-	cvt.rn.f32.f64 	%f93, %fd79;
+	atom.global.add.f32 	%f92, [%rd40], %f104;
 	cvta.to.global.u64 	%rd41, %rd17;
-	atom.global.add.f32 	%f94, [%rd41], %f93;
-	cvt.rn.f32.f64 	%f95, %fd80;
+	atom.global.add.f64 	%fd73, [%rd41], %fd81;
 	cvta.to.global.u64 	%rd42, %rd18;
-	atom.global.add.f32 	%f96, [%rd42], %f95;
+	atom.global.add.f64 	%fd74, [%rd42], %fd82;
 
 $L__BB0_14:
 	ret;

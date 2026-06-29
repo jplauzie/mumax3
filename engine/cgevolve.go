@@ -432,8 +432,8 @@ func (cg *CGEvolve) fillBracket(offset float64, dst *cgBracket) {
 	dst.offset = offset
 	epSum, gsqSum := cuda.CgEpAndGradSq(
 		dst.mxHxm, cg.basept.direction, cg.msv, tsq)
-	dst.Ep = -float64(epSum) * cg.msvRef
-	dst.gradNorm = math.Sqrt(float64(gsqSum)) * cg.msvRef
+	dst.Ep = -epSum * cg.msvRef
+	dst.gradNorm = math.Sqrt(gsqSum) * cg.msvRef
 	dst.Eerr = math.Abs(dst.totalE) * 8e-16
 }
 
@@ -790,11 +790,24 @@ func (cg *CGEvolve) findLineMinimumStep() {
 		math.Abs(cg.bestBracket.Ep)/(cg.bestBracket.gradNorm*cg.basept.dirNorm*cg.anglePrecision*(1+2*cg.sumErrEstimate)),
 		cg.bestBracket.gradNorm, cg.basept.dirNorm, cg.basept.dirMaxMagRaw)
 
-	if converged &&
+	fmt.Printf("CONVERGE_GATES: converged=%v bestEp_gt_baseptEp=%v bestEp_zero=%v offset_zero=%v span_le_stopSpan=%v nudge_ge_span=%v\n",
+		converged,
+		cg.bestBracket.Ep > cg.basept.Ep,
+		cg.bestBracket.Ep == 0,
+		cg.bestBracket.offset == 0,
+		span <= cg.stopSpan,
+		nudge >= span)
+
+	convergedAndBetter := converged &&
 		(cg.bestBracket.Ep == 0 ||
 			cg.bestBracket.Ep > cg.basept.Ep ||
-			cg.bestBracket.offset == 0) && // ADD THIS
-		(cg.bestBracket.Ep == 0 || span <= cg.stopSpan || nudge >= span) {
+			cg.bestBracket.offset == 0)
+
+	if convergedAndBetter &&
+		(cg.bestBracket.Ep == 0 ||
+			cg.bestBracket.Ep > cg.basept.Ep || // if bestEp > baseptEp, skip span check
+			span <= cg.stopSpan ||
+			nudge >= span) {
 		cg.minFound = true
 		cg.bestIsLineMin = true
 		cg.lastMinReductionRatio = 0
@@ -990,11 +1003,23 @@ func (cg *CGEvolve) findLineMinimumStep() {
 		cg.bestBracket.gradNorm*cg.basept.dirNorm*cg.anglePrecision*(1+2*cg.sumErrEstimate),
 		math.Abs(cg.bestBracket.Ep)/(cg.bestBracket.gradNorm*cg.basept.dirNorm*cg.anglePrecision*(1+2*cg.sumErrEstimate)),
 		cg.bestBracket.gradNorm, cg.basept.dirNorm, cg.basept.dirMaxMagRaw)
-	if converged &&
+	fmt.Printf("CONVERGE_GATES_post: converged=%v bestEp_gt_baseptEp=%v bestEp_zero=%v offset_zero=%v span_le_stopSpan=%v nudge_ge_span=%v\n",
+		converged,
+		cg.bestBracket.Ep > cg.basept.Ep,
+		cg.bestBracket.Ep == 0,
+		cg.bestBracket.offset == 0,
+		span <= cg.stopSpan,
+		nudge >= span)
+	convergedAndBetter = converged &&
 		(cg.bestBracket.Ep == 0 ||
 			cg.bestBracket.Ep > cg.basept.Ep ||
-			cg.bestBracket.offset == 0) && // ADD THIS
-		(cg.bestBracket.Ep == 0 || span <= cg.stopSpan || nudge >= span) {
+			cg.bestBracket.offset == 0)
+
+	if convergedAndBetter &&
+		(cg.bestBracket.Ep == 0 ||
+			cg.bestBracket.Ep > cg.basept.Ep || // if bestEp > baseptEp, skip span check
+			span <= cg.stopSpan ||
+			nudge >= span) {
 		cg.minFound = true
 		cg.bestIsLineMin = true
 	} else if cg.right.Ep < 0 {
@@ -1217,6 +1242,7 @@ func (cg *CGEvolve) setBasePoint() {
 			cg.basept.gSumSq = newGSumSq
 			cg.left.Ep = Ep
 			cg.basept.Ep = Ep
+			fmt.Printf("setBasePoint_useconjugate: basept.Ep=%e (unscaled, pre-negation)\n", cg.basept.Ep)
 
 			if Ep < 0 {
 				cg.basept.valid = true
@@ -1256,6 +1282,7 @@ func (cg *CGEvolve) setBasePoint() {
 		cg.basept.gSumSq = float64(cuda.CgGSumSqFR(mxHxm, cg.msv)) * msvRef2
 		cg.left.Ep = Ep
 		cg.basept.Ep = Ep
+		fmt.Printf("setBasePoint_!useconjugate: basept.Ep=%e (unscaled, pre-negation)\n", cg.basept.Ep)
 		cg.basept.valid = true
 	}
 

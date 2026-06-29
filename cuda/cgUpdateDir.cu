@@ -2,6 +2,8 @@
 // CUDA kernel for CG direction update with tangent projection + stats.
 // Ported from OOMMF cgevolve.cc (M.J. Donahue, NIST).
 
+//VERY SKETCHY FLOAT*,to make cuda2go work with double* (for ep and gradsumsq) without changing the interface.
+
 #include <stdint.h>
 
 __device__ static inline float warpSum(float v) {
@@ -61,8 +63,8 @@ cgUpdateDir(
         float* spx,  float* spy,  float* spz,
         float* msv,
         float gamma,
-        float* g_maxmagsq, float* g_normsumsq,
-        float* g_ep,       float* g_gradsumsq,
+        float*  g_maxmagsq, float*  g_normsumsq,
+        float*  g_ep_raw,   float*  g_gradsumsq_raw,  // ← still float* for cuda2go
         int N)
 {
     // smem layout: 32 floats for mm, 32 floats for ns,
@@ -112,7 +114,8 @@ cgUpdateDir(
     if (threadIdx.x == 0) {
         atomicMax((unsigned int*)g_maxmagsq, __float_as_uint(fabsf(mm)));
         atomicAdd(g_normsumsq, ns);
-        atomicAdd(g_ep,        (float)ep);
-        atomicAdd(g_gradsumsq, (float)gs);
+        // Reinterpret float* as double* for the atomic
+        atomicAdd((double*)g_ep_raw,        ep);
+        atomicAdd((double*)g_gradsumsq_raw, gs);
     }
 }

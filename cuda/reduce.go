@@ -95,6 +95,36 @@ func initReduceBuf() {
 	}
 }
 
+var doubleScalarBuffers chan unsafe.Pointer
+
+func initDoubleScalarBuffers() {
+	const N = 128
+	doubleScalarBuffers = make(chan unsafe.Pointer, N)
+	for i := 0; i < N; i++ {
+		doubleScalarBuffers <- MemAlloc(8) // 8 bytes = 1 float64
+	}
+}
+
+func doubleScalarGPU() unsafe.Pointer {
+	if doubleScalarBuffers == nil {
+		initDoubleScalarBuffers()
+	}
+	buf := <-doubleScalarBuffers
+	// Zero the 8 bytes as two 32-bit words
+	cu.MemsetD32Async(cu.DevicePtr(uintptr(buf)), 0, 2, stream0)
+	return buf
+}
+
+func recycleDoubleScalar(buf unsafe.Pointer) {
+	doubleScalarBuffers <- buf
+}
+
+func readDoubleScalar(buf unsafe.Pointer) float64 {
+	var result float64
+	MemCpyDtoH(unsafe.Pointer(&result), buf, 8)
+	return result
+}
+
 // launch configuration for reduce kernels
 // 8 is typ. number of multiprocessors.
 // could be improved but takes hardly ~1% of execution time
