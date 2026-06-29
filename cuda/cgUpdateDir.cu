@@ -2,7 +2,7 @@
 // CUDA kernel for CG direction update with tangent projection + stats.
 // Ported from OOMMF cgevolve.cc (M.J. Donahue, NIST).
 
-//VERY SKETCHY FLOAT*,to make cuda2go work with double* (for ep and gradsumsq) without changing the interface.
+//VERY SKETCHY FLOAT*,to make cuda2go work with double* (for ep and gradsumsq) without changing the interface. Abuses memalloc doing 8byte aligned
 
 #include <stdint.h>
 
