@@ -781,22 +781,23 @@ func (cg *CGEvolve) findLineMinimumStep() {
 	}
 
 	// Check convergence.
-	converged := math.Abs(cg.bestBracket.Ep) <
-		cg.bestBracket.gradNorm*cg.basept.dirNorm*
-			cg.anglePrecision*(1+2*cg.sumErrEstimate)
+	convergenceRHS := cg.bestBracket.gradNorm * cg.basept.dirNorm *
+		cg.anglePrecision * (1 + 2*cg.sumErrEstimate)
+	converged := math.Abs(cg.bestBracket.Ep) < convergenceRHS
 	fmt.Printf("CONVERGE_CHECK: |bestEp|=%e RHS=%e ratio=%e gradNorm=%e dirNorm=%e dirMaxMagRaw=%e\n",
 		math.Abs(cg.bestBracket.Ep),
 		cg.bestBracket.gradNorm*cg.basept.dirNorm*cg.anglePrecision*(1+2*cg.sumErrEstimate),
 		math.Abs(cg.bestBracket.Ep)/(cg.bestBracket.gradNorm*cg.basept.dirNorm*cg.anglePrecision*(1+2*cg.sumErrEstimate)),
 		cg.bestBracket.gradNorm, cg.basept.dirNorm, cg.basept.dirMaxMagRaw)
 
-	fmt.Printf("CONVERGE_GATES: converged=%v bestEp_gt_baseptEp=%v bestEp_zero=%v offset_zero=%v span_le_stopSpan=%v nudge_ge_span=%v\n",
+	fmt.Printf("CONVERGE_GATES: converged=%v bestEp_gt_baseptEp=%v bestEp_zero=%v offset_zero=%v span_le_stopSpan=%v nudge_ge_span=%v ratio=%.6e\n",
 		converged,
 		cg.bestBracket.Ep > cg.basept.Ep,
 		cg.bestBracket.Ep == 0,
 		cg.bestBracket.offset == 0,
 		span <= cg.stopSpan,
-		nudge >= span)
+		nudge >= span,
+		math.Abs(cg.bestBracket.Ep)/convergenceRHS)
 
 	convergedAndBetter := converged &&
 		(cg.bestBracket.Ep == 0 ||
@@ -822,8 +823,7 @@ func (cg *CGEvolve) findLineMinimumStep() {
 		cg.nextToLastMinReductionRatio = 0
 		return
 	}
-	convergenceRHS := cg.bestBracket.gradNorm * cg.basept.dirNorm *
-		cg.anglePrecision * (1 + 2*cg.sumErrEstimate)
+
 	fmt.Printf("PRE-BAD: ... converged=%v convergenceRHS=%e bestEp=%e gradNorm=%e dirNorm=%e anglePrecision=%e sumErrEstimate=%e\n",
 		converged, convergenceRHS,
 		cg.bestBracket.Ep, cg.bestBracket.gradNorm, cg.basept.dirNorm,
@@ -995,21 +995,23 @@ func (cg *CGEvolve) findLineMinimumStep() {
 	cg.lastMinReductionRatio = newSpan / span
 
 	// Check convergence again after update.
-	converged = math.Abs(cg.bestBracket.Ep) <
-		cg.bestBracket.gradNorm*cg.basept.dirNorm*
-			cg.anglePrecision*(1+2*cg.sumErrEstimate)
+	convergenceRHS = cg.bestBracket.gradNorm * cg.basept.dirNorm * cg.anglePrecision * (1 + 2*cg.sumErrEstimate)
+	converged = math.Abs(cg.bestBracket.Ep) < convergenceRHS
 	fmt.Printf("CONVERGE_CHECK_after update: |bestEp|=%e RHS=%e ratio=%e gradNorm=%e dirNorm=%e dirMaxMagRaw=%e\n",
 		math.Abs(cg.bestBracket.Ep),
 		cg.bestBracket.gradNorm*cg.basept.dirNorm*cg.anglePrecision*(1+2*cg.sumErrEstimate),
 		math.Abs(cg.bestBracket.Ep)/(cg.bestBracket.gradNorm*cg.basept.dirNorm*cg.anglePrecision*(1+2*cg.sumErrEstimate)),
 		cg.bestBracket.gradNorm, cg.basept.dirNorm, cg.basept.dirMaxMagRaw)
-	fmt.Printf("CONVERGE_GATES_post: converged=%v bestEp_gt_baseptEp=%v bestEp_zero=%v offset_zero=%v span_le_stopSpan=%v nudge_ge_span=%v\n",
+
+	fmt.Printf("CONVERGE_GATES_post: converged=%v bestEp_gt_baseptEp=%v bestEp_zero=%v offset_zero=%v span_le_stopSpan=%v nudge_ge_span=%v ratio=%.6e spanReduction=%.6e\n",
 		converged,
 		cg.bestBracket.Ep > cg.basept.Ep,
 		cg.bestBracket.Ep == 0,
 		cg.bestBracket.offset == 0,
 		span <= cg.stopSpan,
-		nudge >= span)
+		nudge >= span,
+		math.Abs(cg.bestBracket.Ep)/convergenceRHS,
+		newSpan/span)
 	convergedAndBetter = converged &&
 		(cg.bestBracket.Ep == 0 ||
 			cg.bestBracket.Ep > cg.basept.Ep ||
@@ -1031,6 +1033,10 @@ func (cg *CGEvolve) findLineMinimumStep() {
 			cg.minBracketed = false
 		}
 	}
+	// NOTE: convergenceRHS/converged here are intentionally the values computed
+	// above in the "Check convergence again after update" block — nothing
+	// affecting them (cg.bestBracket, cg.basept.dirNorm, cg.sumErrEstimate)
+	// changes between that block and this print, so recomputing was redundant.
 	fmt.Printf("findLineMinimumStep POST-STEP CHECK: newSpan=%e stopSpan=%e nudge=%e bestEp=%e basept.Ep=%e converged=%v rightEp=%e leftEp=%e -> minFound=%v | leftOffset=%.17e rightOffset=%.17e leftOffsetBits=%016x rightOffsetBits=%016x testOffset=%.17e lambda=%e\n",
 		newSpan, cg.stopSpan, nudge, cg.bestBracket.Ep, cg.basept.Ep, converged, cg.right.Ep, cg.left.Ep, cg.minFound,
 		cg.left.offset, cg.right.offset,
