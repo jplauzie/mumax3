@@ -138,13 +138,13 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	//minimize further with torque? or use dm criteria?
 
 	mHist := l.History
-	s_vec := make([]*data.Slice, mHist)
-	y_vec := make([]*data.Slice, mHist)
+	s_point_vec := make([]*data.Slice, mHist)
+	y_point_vec := make([]*data.Slice, mHist)
 	for i := 0; i < mHist; i++ {
-		s_vec[i] = cuda.Buffer(3, size)
-		y_vec[i] = cuda.Buffer(3, size)
-		defer s_vec[i].Free()
-		defer y_vec[i].Free()
+		s_point_vec[i] = cuda.Buffer(3, size)
+		y_point_vec[i] = cuda.Buffer(3, size)
+		defer s_point_vec[i].Free()
+		defer y_point_vec[i].Free()
 	}
 
 	//normally called alpha in the literature, but avoid that here
@@ -181,10 +181,10 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 
 		// Backward Pass
 		for i := k - 1; i >= 0; i-- {
-			rho := 1.0 / float64(cuda.Dot(s_vec[i], y_vec[i]))
-			alpha_LFBGS[i] = rho * float64(cuda.Dot(s_vec[i], q))
+			rho := 1.0 / float64(cuda.Dot(s_point_vec[i], y_point_vec[i]))
+			alpha_LFBGS[i] = rho * float64(cuda.Dot(s_point_vec[i], q))
 			// q = q - alpha[i]*yVector[i]
-			cuda.Madd2(q, q, y_vec[i], 1.0, float32(-alpha_LFBGS[i]))
+			cuda.Madd2(q, q, y_point_vec[i], 1.0, float32(-alpha_LFBGS[i]))
 		}
 
 		// Scale q
@@ -192,10 +192,10 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 
 		// Forward Pass
 		for i := 0; i < k; i++ {
-			rho := 1.0 / float64(cuda.Dot(s_vec[i], y_vec[i]))
-			beta := rho * float64(cuda.Dot(y_vec[i], q))
+			rho := 1.0 / float64(cuda.Dot(s_point_vec[i], y_point_vec[i]))
+			beta := rho * float64(cuda.Dot(y_point_vec[i], q))
 			// q = q + sVector[i]*(alpha[i] - beta)
-			cuda.Madd2(q, q, s_vec[i], 1.0, float32(alpha_LFBGS[i]-beta))
+			cuda.Madd2(q, q, s_point_vec[i], 1.0, float32(alpha_LFBGS[i]-beta))
 		}
 
 		phiPrime0 := -float64(cuda.Dot(grad, q))
@@ -257,25 +257,29 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 		normY := math.Sqrt(float64(cuda.Dot(y, y)))
 		normS := math.Sqrt(float64(cuda.Dot(s, s)))
 
+		//Nocedal suggests not skipping the update, because LFBGS can be selfcorrecting. test further
+		//check Wolfe condition: s^T y > 0
 		if ys <= eps2*normY*normS {
 			if l.Verbose > 2 {
 				fmt.Printf("%d WARNING: LBFGS_Minimizer:: skipping update!\n", iter)
 			}
 		} else {
 			if iter < mHist {
-				data.Copy(s_vec[iter], s)
-				data.Copy(y_vec[iter], y)
+				// history vectors not full yet, just add new vectors
+				data.Copy(s_point_vec[iter], s)
+				data.Copy(y_point_vec[iter], y)
 			} else {
-				sTmp := s_vec[0]
-				yTmp := y_vec[0]
+				// history vectors full, shift all vectors in a FIFO queue
+				sTmp := s_point_vec[0]
+				yTmp := y_point_vec[0]
 				for i := 0; i < mHist-1; i++ {
-					s_vec[i] = s_vec[i+1]
-					y_vec[i] = y_vec[i+1]
+					s_point_vec[i] = s_point_vec[i+1]
+					y_point_vec[i] = y_point_vec[i+1]
 				}
-				s_vec[mHist-1] = sTmp
-				y_vec[mHist-1] = yTmp
-				data.Copy(s_vec[mHist-1], s)
-				data.Copy(y_vec[mHist-1], y)
+				s_point_vec[mHist-1] = sTmp
+				y_point_vec[mHist-1] = yTmp
+				data.Copy(s_point_vec[mHist-1], s)
+				data.Copy(y_point_vec[mHist-1], y)
 			}
 			H0k = ys / float64(cuda.Dot(y, y))
 			iter++
@@ -285,7 +289,7 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 		NSteps++
 	}
 
-	if globIter >= l.MaxIter && l.MaxIter > 99 && l.Verbose > 0 {
+	if globIter >= l.MaxIter && l.Verbose > 0 {
 		fmt.Println("WARNING : maximum number of iterations exceeded in LBFGS")
 	}
 
