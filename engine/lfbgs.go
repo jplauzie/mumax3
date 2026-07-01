@@ -9,12 +9,16 @@ import (
 	"github.com/mumax/3/data"
 )
 
-// 1. Define global variables to hold the script settings with sensible defaults
+// Based heavily on "Numerical Optimization" by Nocedal and Wright, 2nd edition, Springer, 2006.
+//see also  J. Nocedal. Updating Quasi-Newton Matrices with Limited Storage (1980), Mathematics of Computation 35, pp. 773-782.
+
 var (
 	LBFGSTolerance float64 = 1e-5
 	LBFGSMaxIter   int     = 10000
 	LBFGSVerbose   int     = 0
-	LBFGSHistory   int     = 5
+	//Nocedal suggests between 3-20
+	LBFGSHistory      int     = 5
+	LBFGSMaxStepAngle float64 = 45.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
 )
 
 // 2. Create a zero-argument wrapper function for the script to call
@@ -22,6 +26,7 @@ func RunMinimizeLBFGS() bool {
 	// Instantiate the minimizer using the current global script variables
 	minimizer := NewLBFGSMinimizer(LBFGSTolerance, LBFGSMaxIter, LBFGSVerbose)
 	minimizer.History = LBFGSHistory
+	minimizer.MaxStepAngle = LBFGSMaxStepAngle
 
 	// Execute the minimization
 	return minimizer.MinimizeLBFGS()
@@ -37,23 +42,26 @@ func init() {
 	DeclVar("LBFGSMaxIter", &LBFGSMaxIter, "Maximum number of iterations for the L-BFGS minimizer (default: 10000).")
 	DeclVar("LBFGSVerbose", &LBFGSVerbose, "Verbosity level of the L-BFGS minimizer: 0=silent, 1=basic, 2=detailed (default: 0).")
 	DeclVar("LBFGSHistory", &LBFGSHistory, "Number of previous gradients to store for the L-BFGS inverse Hessian approximation (default: 5).")
+	DeclVar("LBFGSMaxStepAngle", &LBFGSMaxStepAngle, "Maximum angle (degrees) magnetization may rotate in a single L-BFGS trial step; prevents jumping to an unrelated energy basin. Set <=0 to disable (default: 45).")
 }
 
 // LBFGSMinimizer implements the L-BFGS optimization routine.
 type LBFGSMinimizer struct {
-	Tolerance float64
-	MaxIter   int
-	Verbose   int
-	History   int // 'm' parameter in L-BFGS (default: 5)
+	Tolerance    float64
+	MaxIter      int
+	Verbose      int
+	History      int // 'm' parameter in L-BFGS (default: 5)
+	MaxStepAngle float64
 }
 
 // NewLBFGSMinimizer initializes a new L-BFGS minimizer configuration.
 func NewLBFGSMinimizer(tolerance float64, maxIter int, verbose int) *LBFGSMinimizer {
 	return &LBFGSMinimizer{
-		Tolerance: tolerance,
-		MaxIter:   maxIter,
-		Verbose:   verbose,
-		History:   5,
+		Tolerance:    tolerance,
+		MaxIter:      maxIter,
+		Verbose:      verbose,
+		History:      5,
+		MaxStepAngle: LBFGSMaxStepAngle,
 	}
 }
 
@@ -62,20 +70,17 @@ func NewLBFGSMinimizer(tolerance float64, maxIter int, verbose int) *LBFGSMinimi
 // EnergyAndGradient updates the magnetization, normalizes it, and calculates
 // both the system energy and the gradient.
 func (l *LBFGSMinimizer) EnergyAndGradient(g *data.Slice) float64 {
-	// 1. Ensure we are strictly on the unit sphere
+	// Ensure we are strictly on the unit sphere
 	M.normalize()
 
-	// 2. Compute the damping torque into g
+	// Compute the damping torque into g
 	torqueFn(g)
+	setMaxTorque(g)
 
-	// 3. FIX THE SIGN!
+	// Sign is backwards, as in minimizer
 	// LLNoPrecess calculates the damping torque as `-m x (m x B)`.
-	// This evaluates to the NEGATIVE gradient (the descent direction).
-	// L-BFGS requires the POSITIVE gradient to build its Hessian properly.
-	// We simply invert the vector: g = -1.0 * g + 0.0 * g
 	cuda.Madd2(g, g, g, -1.0, 0.0)
 
-	// 4. Return the total system energy
 	return GetTotalEnergy()
 }
 
@@ -84,11 +89,12 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	// Setup standard minimization environment conventions
 	TimerStart := time.Now()
 	MinimizeConverged = false
+
+	// if wall-clock time is zero, skip minimization entirely (zero steps), and don't change any settings
 	if MinimizeWallClockTime == 0 {
+		MinimizeConverged = false
 		return MinimizeConverged
 	}
-
-	SanityCheck()
 
 	// Save the settings we are changing...
 	prevType := solvertype
@@ -113,9 +119,9 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 		stepper = nil
 	}
 
-	eps := 2.22e-16
-	eps2 := math.Sqrt(eps)
-	epsr := math.Pow(eps, 0.9)
+	eps64 := 2.22e-16
+	sqrteps := math.Sqrt(eps64)
+	epsr := math.Pow(eps64, 0.9)
 	tolf2 := math.Sqrt(l.Tolerance)
 	tolf3 := math.Pow(l.Tolerance, 1.0/3.0)
 
@@ -147,7 +153,6 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 		defer y_point_vec[i].Free()
 	}
 
-	//normally called alpha in the literature, but avoid that here
 	alpha_LFBGS := make([]float64, mHist)
 
 	q := cuda.Buffer(3, size)
@@ -155,12 +160,15 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	y := cuda.Buffer(3, size)
 	grad_old := cuda.Buffer(3, size)
 	x_old := cuda.Buffer(3, size)
+	searchDir := cuda.Buffer(3, size)
+	rhoVals := make([]float64, mHist)
 
 	defer q.Free()
 	defer s.Free()
 	defer y.Free()
 	defer grad_old.Free()
 	defer x_old.Free()
+	defer searchDir.Free()
 
 	f_old := 0.0
 	iter := 0
@@ -168,7 +176,7 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	H0k := 1.0
 
 	for globIter < l.MaxIter && WallclockTimer(TimerStart, MinimizeWallClockTime) {
-		cgSteps := 0
+		//cgSteps := 0
 		f_old = f
 		data.Copy(x_old, M.Buffer())
 		data.Copy(grad_old, grad)
@@ -181,8 +189,8 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 
 		// Backward Pass
 		for i := k - 1; i >= 0; i-- {
-			rho := 1.0 / float64(cuda.Dot(s_point_vec[i], y_point_vec[i]))
-			alpha_LFBGS[i] = rho * float64(cuda.Dot(s_point_vec[i], q))
+			rhoVals[i] = 1.0 / float64(cuda.Dot(s_point_vec[i], y_point_vec[i]))
+			alpha_LFBGS[i] = rhoVals[i] * float64(cuda.Dot(s_point_vec[i], q))
 			// q = q - alpha[i]*yVector[i]
 			cuda.Madd2(q, q, y_point_vec[i], 1.0, float32(-alpha_LFBGS[i]))
 		}
@@ -192,16 +200,18 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 
 		// Forward Pass
 		for i := 0; i < k; i++ {
-			rho := 1.0 / float64(cuda.Dot(s_point_vec[i], y_point_vec[i]))
-			beta := rho * float64(cuda.Dot(y_point_vec[i], q))
+			//rho := 1.0 / float64(cuda.Dot(s_point_vec[i], y_point_vec[i]))
+			beta := rhoVals[i] * float64(cuda.Dot(y_point_vec[i], q))
 			// q = q + sVector[i]*(alpha[i] - beta)
 			cuda.Madd2(q, q, s_point_vec[i], 1.0, float32(alpha_LFBGS[i]-beta))
 		}
 
 		phiPrime0 := -float64(cuda.Dot(grad, q))
+		isFirstIter := (globIter == 0)
 		if phiPrime0 > 0 {
 			data.Copy(q, grad)
 			iter = 0
+			isFirstIter = true // no curvature info survives this reset either
 			if l.Verbose > 2 {
 				fmt.Println("descent ")
 			}
@@ -211,20 +221,16 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 
 		if -float64(cuda.Dot(grad, q)) > -1e-15 {
 			gradNorm = float64(cuda.MaxVecNorm(grad))
-			if gradNorm < eps*(1.0+math.Abs(f)) && l.Verbose > 0 {
-				fmt.Printf("Minimizer: Convergence reached (due to almost zero gradient (|grad|=%e < %e)!\n", gradNorm, eps*(1.0+math.Abs(f)))
+			if gradNorm < eps64*(1.0+math.Abs(f)) && l.Verbose > 0 {
+				fmt.Printf("Minimizer: Convergence reached (due to almost zero gradient (|grad|=%e < %e)!\n", gradNorm, eps64*(1.0+math.Abs(f)))
+				MinimizeConverged = false
+				return MinimizeConverged
 			}
 		}
 
-		searchDir := cuda.Buffer(3, size)
 		cuda.Madd2(searchDir, q, q, -1.0, 0.0) // searchDir = -q
 
-		rate := l.linesearch(x_old, &f, grad, searchDir)
-		searchDir.Free()
-
-		if rate == 0.0 && l.Verbose > 0 {
-			fmt.Println("Warning: LBFGS_Minimizer: linesearch returned rate == 0.0. This should not happen.")
-		}
+		rate := l.linesearch(x_old, &f, grad, searchDir, isFirstIter)
 
 		f1 := 1.0 + math.Abs(f)
 		gradNorm = float64(cuda.MaxVecNorm(grad))
@@ -237,7 +243,7 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 		cuda.Madd2(s, M.Buffer(), x_old, 1.0, -1.0)
 
 		if l.Verbose > 1 {
-			fmt.Printf("lbfgs> %d %.24e %e %d %e\n", globIter, f, gradNorm, cgSteps, rate)
+			fmt.Printf("lbfgs> %d %.24e %e %e\n", globIter, f, gradNorm, rate)
 		}
 
 		maxAbsS := float64(cuda.MaxVecNorm(s))
@@ -257,9 +263,9 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 		normY := math.Sqrt(float64(cuda.Dot(y, y)))
 		normS := math.Sqrt(float64(cuda.Dot(s, s)))
 
-		//Nocedal suggests not skipping the update, because LFBGS can be selfcorrecting. test further
+		//Nocedal suggests not skipping the update, because LFBGS can be selfcorrecting. test further (need an actual example where this fires)
 		//check Wolfe condition: s^T y > 0
-		if ys <= eps2*normY*normS {
+		if ys <= sqrteps*normY*normS {
 			if l.Verbose > 2 {
 				fmt.Printf("%d WARNING: LBFGS_Minimizer:: skipping update!\n", iter)
 			}
@@ -296,25 +302,37 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	return MinimizeConverged
 }
 
-func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval *float64, g *data.Slice, searchDir *data.Slice) float64 {
+func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval *float64, g *data.Slice, searchDir *data.Slice, isFirstIter bool) float64 {
 	rate := 1.0
-	l.cvsrch(x_old, fval, g, &rate, searchDir)
+	if isFirstIter {
+		gInfNorm := float64(cuda.MaxVecNorm(g))
+		if gInfNorm > 0 {
+			rate = 1.0 / gInfNorm
+		}
+		if rate > 1.0 {
+			rate = 1.0 // never take a larger-than-unit step with no curvature info yet
+		}
+	}
+	l.cubicvalsearch(x_old, fval, g, &rate, searchDir)
+	if rate == 0.0 && l.Verbose > 0 {
+		fmt.Println("Warning: LBFGS_Minimizer: linesearch returned rate == 0.0!")
+	}
 	return rate
 }
 
-func (l *LBFGSMinimizer) cvsrch(wa *data.Slice, f *float64, g *data.Slice, stp *float64, s *data.Slice) int {
+func (l *LBFGSMinimizer) cubicvalsearch(wa *data.Slice, f *float64, g *data.Slice, stp *float64, s *data.Slice) int {
 	info := 0
 	infoc := 1
 
 	xtol := 1e-15
 	ftol := 1.0e-4
 	gtol := 0.9
-	eps := l.Tolerance
-	stpmin := 1e-15
-	stpmax := 1e15
+	eps32 := 1.1920929e-07 // float32 machine epsilon (energy/gradient come from float32 GPU reductions)
+	stepmin := 1e-15
+	stepmax := 1e15
 	xtrapf := 4.0
-	maxfev := 20
-	nfev := 0
+	max_f_ev := 20
+	num_f_evals := 0
 
 	dginit := float64(cuda.Dot(g, s))
 	if dginit >= 0.0 {
@@ -324,12 +342,27 @@ func (l *LBFGSMinimizer) cvsrch(wa *data.Slice, f *float64, g *data.Slice, stp *
 		return -1
 	}
 
-	brackt := false
+	// Precompute the angle-based step cap once, before trying any trial steps.
+	// For a unit vector m, adding a component of magnitude stp*||s||_inf and
+	// renormalizing rotates it by approximately atan(stp*||s||_inf). This is a
+	// conservative (upper-bound) estimate since it ignores the component of s
+	// parallel to m. s (the search direction) is fixed for this whole call,
+	// only *stp varies, so this only needs to be computed once.
+	stpAngleCap := math.Inf(1)
+	if l.MaxStepAngle > 0 {
+		maxDirNorm := float64(cuda.MaxVecNorm(s))
+		if maxDirNorm > 0 {
+			maxAngleRad := l.MaxStepAngle * math.Pi / 180.0
+			stpAngleCap = math.Tan(maxAngleRad) / maxDirNorm
+		}
+	}
+
+	bracketed := false
 	stage1 := true
 
 	finit := *f
 	dgtest := ftol * dginit
-	width := stpmax - stpmin
+	width := stepmax - stepmin
 	width1 := 2.0 * width
 
 	stx := 0.0
@@ -342,8 +375,9 @@ func (l *LBFGSMinimizer) cvsrch(wa *data.Slice, f *float64, g *data.Slice, stp *
 	stmin := math.NaN()
 	stmax := math.NaN()
 
+	//while loop in Go
 	for {
-		if brackt {
+		if bracketed {
 			stmin = math.Min(stx, sty)
 			stmax = math.Max(stx, sty)
 		} else {
@@ -351,10 +385,17 @@ func (l *LBFGSMinimizer) cvsrch(wa *data.Slice, f *float64, g *data.Slice, stp *
 			stmax = *stp + xtrapf*(*stp-stx)
 		}
 
-		*stp = math.Max(*stp, stpmin)
-		*stp = math.Min(*stp, stpmax)
+		*stp = math.Max(*stp, stepmin)
+		*stp = math.Min(*stp, stepmax)
 
-		if (brackt && ((*stp <= stmin) || (*stp >= stmax))) || (nfev >= maxfev-1) || (infoc == 0) || (brackt && (stmax-stmin <= xtol*stmax)) {
+		if *stp > stpAngleCap {
+			*stp = stpAngleCap
+			if l.Verbose > 1 {
+				fmt.Printf("LBFGS: step clamped by LBFGSMaxStepAngle (%.2f deg)\n", l.MaxStepAngle)
+			}
+		}
+
+		if (bracketed && ((*stp <= stmin) || (*stp >= stmax))) || (num_f_evals >= max_f_ev-1) || (infoc == 0) || (bracketed && (stmax-stmin <= xtol*stmax)) {
 			*stp = stx
 		}
 
@@ -364,26 +405,28 @@ func (l *LBFGSMinimizer) cvsrch(wa *data.Slice, f *float64, g *data.Slice, stp *
 		// Evaluate updated objective
 		*f = l.EnergyAndGradient(g)
 
-		nfev++
+		num_f_evals++
 
 		dg := float64(cuda.Dot(g, s))
 		ftest1 := finit + (*stp)*dgtest
-		ftest2 := finit + eps*math.Abs(finit)
+		ftest2 := finit + eps32*math.Abs(finit)
 		ft := 2.0*ftol - 1.0
 
-		if (brackt && ((*stp <= stmin) || (*stp >= stmax))) || (infoc == 0) {
+		//
+
+		if (bracketed && ((*stp <= stmin) || (*stp >= stmax))) || (infoc == 0) {
 			info = 6
 		}
-		if (*stp == stpmax) && (*f <= ftest2) && (dg <= dgtest) {
+		if (*stp == stepmax) && (*f <= ftest2) && (dg <= dgtest) {
 			info = 5
 		}
-		if (*stp == stpmin) && ((*f > ftest2) || (dg >= dgtest)) {
+		if (*stp == stepmin) && ((*f > ftest2) || (dg >= dgtest)) {
 			info = 4
 		}
-		if nfev >= maxfev {
+		if num_f_evals >= max_f_ev {
 			info = 3
 		}
-		if brackt && (stmax-stmin <= xtol*stmax) {
+		if bracketed && (stmax-stmin <= xtol*stmax) {
 			info = 2
 		}
 		if (*f <= ftest1) && (math.Abs(dg) <= gtol*(-dginit)) {
@@ -409,17 +452,17 @@ func (l *LBFGSMinimizer) cvsrch(wa *data.Slice, f *float64, g *data.Slice, stp *
 			dgxm := dgx - dgtest
 			dgym := dgy - dgtest
 
-			cstep(&stx, &fxm, &dgxm, &sty, &fym, &dgym, stp, &fm, &dgm, &brackt, stmin, stmax, &infoc)
+			cubicstep(&stx, &fxm, &dgxm, &sty, &fym, &dgym, stp, &fm, &dgm, &bracketed, stmin, stmax, &infoc)
 
 			fx = fxm + stx*dgtest
 			fy = fym + sty*dgtest
 			dgx = dgxm + dgtest
 			dgy = dgym + dgtest
 		} else {
-			cstep(&stx, &fx, &dgx, &sty, &fy, &dgy, stp, f, &dg, &brackt, stmin, stmax, &infoc)
+			cubicstep(&stx, &fx, &dgx, &sty, &fy, &dgy, stp, f, &dg, &bracketed, stmin, stmax, &infoc)
 		}
 
-		if brackt {
+		if bracketed {
 			if math.Abs(sty-stx) >= 0.66*width1 {
 				*stp = stx + 0.5*(sty-stx)
 			}
@@ -429,11 +472,11 @@ func (l *LBFGSMinimizer) cvsrch(wa *data.Slice, f *float64, g *data.Slice, stp *
 	}
 }
 
-func cstep(stx, fx, dx, sty, fy, dy, stp, fp, dp *float64, brackt *bool, stpmin, stpmax float64, info *int) int {
+func cubicstep(stx, fx, dx, sty, fy, dy, stp, fp, dp *float64, bracketed *bool, stpmin, stpmax float64, info *int) int {
 	*info = 0
 	bound := false
 
-	if (*brackt && ((*stp <= math.Min(*stx, *sty)) || (*stp >= math.Max(*stx, *sty)))) || (*dx*(*stp-*stx) >= 0.0) || (stpmax < stpmin) {
+	if (*bracketed && ((*stp <= math.Min(*stx, *sty)) || (*stp >= math.Max(*stx, *sty)))) || (*dx*(*stp-*stx) >= 0.0) || (stpmax < stpmin) {
 		return -1
 	}
 
@@ -460,7 +503,7 @@ func cstep(stx, fx, dx, sty, fy, dy, stp, fp, dp *float64, brackt *bool, stpmin,
 		} else {
 			stpf = stpc + (stpq-stpc)/2.0
 		}
-		*brackt = true
+		*bracketed = true
 	} else if sgnd < 0.0 {
 		*info = 2
 		bound = false
@@ -480,7 +523,7 @@ func cstep(stx, fx, dx, sty, fy, dy, stp, fp, dp *float64, brackt *bool, stpmin,
 		} else {
 			stpf = stpq
 		}
-		*brackt = true
+		*bracketed = true
 	} else if math.Abs(*dp) < math.Abs(*dx) {
 		*info = 3
 		bound = true
@@ -501,7 +544,7 @@ func cstep(stx, fx, dx, sty, fy, dy, stp, fp, dp *float64, brackt *bool, stpmin,
 			stpc = stpmin
 		}
 		stpq = *stp + (*dp/(*dp-*dx))*(*stx-*stp)
-		if *brackt {
+		if *bracketed {
 			if math.Abs(*stp-stpc) < math.Abs(*stp-stpq) {
 				stpf = stpc
 			} else {
@@ -517,7 +560,7 @@ func cstep(stx, fx, dx, sty, fy, dy, stp, fp, dp *float64, brackt *bool, stpmin,
 	} else {
 		*info = 4
 		bound = false
-		if *brackt {
+		if *bracketed {
 			theta := 3.0*(*fp-*fy)/(*sty-*stp) + *dy + *dp
 			s := math.Max(theta, math.Max(*dy, *dp))
 			gamma := s * math.Sqrt(math.Max(0.0, (theta/s)*(theta/s)-(*dy/s)*(*dp/s)))
@@ -555,7 +598,7 @@ func cstep(stx, fx, dx, sty, fy, dy, stp, fp, dp *float64, brackt *bool, stpmin,
 	stpf = math.Max(stpmin, stpf)
 	*stp = stpf
 
-	if *brackt && bound {
+	if *bracketed && bound {
 		if *sty > *stx {
 			*stp = math.Min(*stx+0.66*(*sty-*stx), *stp)
 		} else {
