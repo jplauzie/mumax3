@@ -15,16 +15,50 @@ var (
 	LBFGSTolerance float64 = 1e-5
 	LBFGSMaxIter   int     = 10000
 	LBFGSVerbose   int     = 0
-	//Nocedal suggests between 3-20
-	LBFGSHistory      int     = 5
-	LBFGSMaxStepAngle float64 = 85.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
+	//Nocedal suggests between 3-20, currently mumax is limited to ~10-11 otherwise buffer.go will think there is a memory leak and panic
+	LBFGSHistory       int     = 5
+	LBFGSMaxStepAngle  float64 = 85.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
+	LBFGSPersist       bool    = false
+	LBFGSMinimizerStop float64 = 1e-6
+	LBFGSMaxTorqueStop float64 = 0 // if >0, converge when max torque drops below this (absolute, same units as GetMaxTorque); 0 disables
 )
+var persistentLBFGS *LBFGSMinimizer
 
 // Create a zero-argument wrapper function for the script to call
 func RunMinimizeLBFGS() bool {
-	minimizer := NewLBFGSMinimizer(LBFGSTolerance, LBFGSMaxIter, LBFGSVerbose)
-	minimizer.History = LBFGSHistory
-	minimizer.MaxStepAngle = LBFGSMaxStepAngle
+	var minimizer *LBFGSMinimizer
+	if LBFGSPersist {
+		if persistentLBFGS == nil {
+			persistentLBFGS = NewLBFGSMinimizer(LBFGSTolerance, LBFGSMaxIter, LBFGSVerbose)
+			persistentLBFGS.History = LBFGSHistory
+		}
+		minimizer = persistentLBFGS
+		// cheap scalar settings can always be refreshed
+		minimizer.Tolerance = LBFGSTolerance
+		minimizer.MaxIter = LBFGSMaxIter
+		minimizer.Verbose = LBFGSVerbose
+		minimizer.MaxStepAngle = LBFGSMaxStepAngle
+
+		gradSizeStr := "nil"
+		if minimizer.grad != nil {
+			gradSizeStr = fmt.Sprintf("%v", minimizer.grad.Size())
+		}
+		fmt.Printf("PRE-FREE CHECK: initialized=%v minimizer.History=%d LBFGSHistory=%d gradSize=%v mSize=%v\n",
+			minimizer.initialized, minimizer.History, LBFGSHistory, gradSizeStr, M.Buffer().Size())
+
+		// History/grid size changes invalidate the allocated buffers --
+		// free and let it lazily reinit (this does wipe history, unavoidably)
+		if minimizer.initialized && (minimizer.History != LBFGSHistory || minimizer.grad.Size() != M.Buffer().Size()) {
+			fmt.Println("PRE-FREE CHECK: freeing due to mismatch")
+			minimizer.freeBuffers() // explicit reinit: always actually free, even if persisted
+
+		}
+		minimizer.History = LBFGSHistory
+	} else {
+		minimizer = NewLBFGSMinimizer(LBFGSTolerance, LBFGSMaxIter, LBFGSVerbose)
+		minimizer.History = LBFGSHistory
+		minimizer.MaxStepAngle = LBFGSMaxStepAngle
+	}
 	return minimizer.MinimizeLBFGS()
 }
 
@@ -37,6 +71,9 @@ func init() {
 	DeclVar("LBFGSVerbose", &LBFGSVerbose, "Verbosity level of the L-BFGS minimizer: 0=silent, 1=basic, 2=detailed (default: 0).")
 	DeclVar("LBFGSHistory", &LBFGSHistory, "Number of previous gradients to store for the L-BFGS inverse Hessian approximation (default: 5).")
 	DeclVar("LBFGSMaxStepAngle", &LBFGSMaxStepAngle, "Maximum angle (degrees) magnetization may rotate in a single L-BFGS trial step; prevents jumping to an unrelated energy basin. Set <=0 to disable (default: 45).")
+	DeclVar("LBFGSPersist", &LBFGSPersist, "If true, reuse the L-BFGS curvature history across MinimizeLBFGS() calls instead of resetting each time. Useful for parameter sweeps with small steps between calls (default: false).")
+	DeclVar("LBFGSMinimizerStop", &LBFGSMinimizerStop, "Minimum change in M for convergence (default: 1e-6).")
+	DeclVar("LBFGSMaxTorqueStop", &LBFGSMaxTorqueStop, "If >0, L-BFGS stops once the maximum torque drops below this value (absolute), independent of LBFGSTolerance. 0 disables this check (default: 0).")
 }
 
 // LBFGSMinimizer implements the L-BFGS optimization routine, and satisfies
@@ -53,7 +90,8 @@ type LBFGSMinimizer struct {
 
 	grad, grad_old, x_old, q, s, y, searchDir *data.Slice
 	s_point_vec, y_point_vec                  []*data.Slice
-	rhoVals, alpha_LFBGS                      []float64
+	rho                                       []float64 // cached 1/(y·s), computed once when each pair is inserted, indexed in parallel with s_point_vec/y_point_vec
+	alpha_LFBGS                               []float64
 
 	f, f_old, H0k, gradNorm       float64
 	eps, eps2, epsr, tolf2, tolf3 float64
@@ -93,9 +131,9 @@ func (l *LBFGSMinimizer) EnergyAndGradient(g *data.Slice) float64 {
 	return GetTotalEnergy()
 }
 
-// init lazily allocates persistent GPU buffers and history slots, and
-// evaluates the initial energy/gradient. Mirrors the mini.k == nil pattern
-// in Minimizer.Step().
+// init lazily allocates persistent GPU buffers and history slots. Only
+// runs once per minimizer instance (or after Free() due to a History/grid
+// size change).
 func (l *LBFGSMinimizer) init() {
 	m := M.Buffer()
 	size := m.Size()
@@ -115,12 +153,34 @@ func (l *LBFGSMinimizer) init() {
 		l.s_point_vec[i] = cuda.Buffer(3, size)
 		l.y_point_vec[i] = cuda.Buffer(3, size)
 	}
-	l.rhoVals = make([]float64, mHist)
+	l.rho = make([]float64, mHist)
 	l.alpha_LFBGS = make([]float64, mHist)
 
-	l.eps = 1.1920929e-07 // float32 machine epsilon; energy/grad come from float32 GPU reductions
+	l.eps = 1.1920929e-07
 	l.eps2 = math.Sqrt(l.eps)
 	l.epsr = math.Pow(l.eps, 0.9)
+
+	l.H0k = 1.0
+	l.iter = 0
+
+	l.resetRunState()
+
+	// Only a genuinely fresh minimizer gets to declare "nothing to do" —
+	// a resumed/persisted call always takes at least one real step, since
+	// resetRunState() alone can't tell "exact symmetry" apart from "truly done."
+	if l.gradNorm < (l.epsr * (1.0 + math.Abs(l.f))) {
+		l.converged = true
+	}
+
+	l.initialized = true
+}
+
+// resetRunState re-evaluates the objective/gradient at the current state
+// and clears per-call bookkeeping (globIter, converged, GUI ring buffer).
+// It deliberately leaves the L-BFGS curvature history (s_point_vec,
+// y_point_vec, H0k, iter) untouched, so a persisted minimizer keeps its
+// warm-started curvature estimate across calls.
+func (l *LBFGSMinimizer) resetRunState() {
 	l.tolf2 = math.Sqrt(l.Tolerance)
 	l.tolf3 = math.Pow(l.Tolerance, 1.0/3.0)
 
@@ -128,8 +188,6 @@ func (l *LBFGSMinimizer) init() {
 	l.gradNorm = float64(cuda.MaxVecNorm(l.grad))
 	setMaxTorque(l.grad)
 
-	l.H0k = 1.0
-	l.iter = 0
 	l.globIter = 0
 	l.converged = false
 	l.lastDm = FifoRing(DmSamples)
@@ -138,11 +196,6 @@ func (l *LBFGSMinimizer) init() {
 		fmt.Printf("objective function (energy)= %.24e\n", l.f)
 	}
 
-	if l.gradNorm < (l.epsr * (1.0 + math.Abs(l.f))) {
-		l.converged = true
-	}
-
-	l.initialized = true
 }
 
 // Step executes a single outer L-BFGS iteration: two-loop recursion, line
@@ -151,6 +204,15 @@ func (l *LBFGSMinimizer) init() {
 func (l *LBFGSMinimizer) Step() {
 	if !l.initialized {
 		l.init()
+		if l.converged {
+			return
+		}
+	} else if l == persistentLBFGS && l.globIter == 0 {
+		// First Step() of a resumed persisted run: re-sync f/grad against
+		// whatever changed (B_ext, Aex, run(), ...) since the last call.
+		// Curvature history (s_point_vec/y_point_vec/H0k/iter) is left
+		// untouched -- that's the whole point of persistence.
+		l.resetRunState()
 		if l.converged {
 			return
 		}
@@ -169,8 +231,8 @@ func (l *LBFGSMinimizer) Step() {
 
 	// Backward pass
 	for i := k - 1; i >= 0; i-- {
-		l.rhoVals[i] = 1.0 / float64(cuda.Dot(l.s_point_vec[i], l.y_point_vec[i]))
-		l.alpha_LFBGS[i] = l.rhoVals[i] * float64(cuda.Dot(l.s_point_vec[i], l.q))
+		//l.rhoVals[i] = 1.0 / float64(cuda.Dot(l.s_point_vec[i], l.y_point_vec[i]))
+		l.alpha_LFBGS[i] = l.rho[i] * float64(cuda.Dot(l.s_point_vec[i], l.q))
 		cuda.Madd2(l.q, l.q, l.y_point_vec[i], 1.0, float32(-l.alpha_LFBGS[i]))
 	}
 
@@ -179,7 +241,7 @@ func (l *LBFGSMinimizer) Step() {
 
 	// Forward pass
 	for i := 0; i < k; i++ {
-		beta := l.rhoVals[i] * float64(cuda.Dot(l.y_point_vec[i], l.q))
+		beta := l.rho[i] * float64(cuda.Dot(l.y_point_vec[i], l.q))
 		cuda.Madd2(l.q, l.q, l.s_point_vec[i], 1.0, float32(l.alpha_LFBGS[i]-beta))
 	}
 
@@ -212,6 +274,13 @@ func (l *LBFGSMinimizer) Step() {
 		return
 	}
 
+	// Explicit user-set absolute torque stop, directly comparable across
+	// minimizers if they check the same quantity (max torque, absolute units).
+	if LBFGSMaxTorqueStop > 0 && l.gradNorm <= LBFGSMaxTorqueStop {
+		l.converged = true
+		return
+	}
+
 	// s = M.Buffer() - x_old
 	cuda.Madd2(l.s, M.Buffer(), l.x_old, 1.0, -1.0)
 
@@ -219,6 +288,13 @@ func (l *LBFGSMinimizer) Step() {
 	maxAbsS := float64(maxAbsSf32)
 	l.lastDm.Add(maxAbsSf32)
 	setLastErr(l.lastDm.Max()) // report to GUI, same convention as Minimizer
+
+	// dM-based stop, directly comparable to the steepest-descent Minimizer,
+	// which also stops when l.lastDm.Max() < MinimizerStop.
+	//if float64(l.lastDm.Max()) < LBFGSMinimizerStop {
+	//	fmt.Printf("triggered: %e < %e\n", float64(l.lastDm.Max()), LBFGSMinimizerStop)
+	//	l.converged = true
+	//}
 
 	if l.Verbose > 1 {
 		fmt.Printf("lbfgs> %d %.24e %e %e\n", l.globIter, l.f, l.gradNorm, rate)
@@ -246,17 +322,20 @@ func (l *LBFGSMinimizer) Step() {
 		if l.iter < mHist {
 			data.Copy(l.s_point_vec[l.iter], l.s)
 			data.Copy(l.y_point_vec[l.iter], l.y)
+			l.rho[l.iter] = 1.0 / ys
 		} else {
 			sTmp := l.s_point_vec[0]
 			yTmp := l.y_point_vec[0]
 			for i := 0; i < mHist-1; i++ {
 				l.s_point_vec[i] = l.s_point_vec[i+1]
 				l.y_point_vec[i] = l.y_point_vec[i+1]
+				l.rho[i] = l.rho[i+1]
 			}
 			l.s_point_vec[mHist-1] = sTmp
 			l.y_point_vec[mHist-1] = yTmp
 			data.Copy(l.s_point_vec[mHist-1], l.s)
 			data.Copy(l.y_point_vec[mHist-1], l.y)
+			l.rho[mHist-1] = 1.0 / ys
 		}
 		l.H0k = ys / float64(cuda.Dot(l.y, l.y))
 		l.iter++
@@ -266,8 +345,11 @@ func (l *LBFGSMinimizer) Step() {
 	NSteps++
 }
 
-// Free releases persistent GPU buffers. Satisfies the Stepper interface.
-func (l *LBFGSMinimizer) Free() {
+// freeBuffers releases persistent GPU buffers unconditionally. This is the
+// real deallocation logic -- used for genuine cleanup (non-persisted
+// instances) and for explicit reinit when History or grid size changes,
+// even on the persisted instance.
+func (l *LBFGSMinimizer) freeBuffers() {
 	if !l.initialized {
 		return
 	}
@@ -283,6 +365,21 @@ func (l *LBFGSMinimizer) Free() {
 		l.y_point_vec[i].Free()
 	}
 	l.initialized = false
+	l.converged = false
+	l.globIter = 0
+}
+
+// Free satisfies the Stepper interface. RunWhile() calls this
+// unconditionally at the start of every run, so the persisted instance
+// must survive it -- only freeBuffers() (called explicitly, e.g. on a
+// History/grid-size change) actually releases its GPU memory.
+func (l *LBFGSMinimizer) Free() {
+	if l == persistentLBFGS {
+		l.converged = false
+		l.globIter = 0
+		return
+	}
+	l.freeBuffers()
 }
 
 // MinimizeLBFGS sets up the global environment, installs itself as the
@@ -293,21 +390,18 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	MinimizeConverged = false
 	TimerStart := time.Now()
 
-	// if wall-clock time is zero, skip minimization entirely (zero steps), and don't change any settings
 	if MinimizeWallClockTime == 0 {
 		return MinimizeConverged
 	}
 
 	SanityCheck()
 
-	// Save the settings we are changing...
 	prevType := solvertype
 	prevFixDt := FixDt
 	prevPrecess := Precess
 	t0 := Time
-	relaxing = true // disable temperature noise
+	relaxing = true
 
-	// ...to restore them later
 	defer func() {
 		SetSolver(prevType)
 		FixDt = prevFixDt
@@ -316,13 +410,16 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 		relaxing = false
 	}()
 
-	Precess = false // disable precession for pure gradient calculation
-	if stepper != nil {
+	Precess = false
+	if stepper != nil && stepper != l {
 		stepper.Free()
 	}
-
-	// install self as the active stepper, exactly like Minimize() does with mini
 	stepper = l
+
+	// Note: no manual resetRunState() call here anymore -- RunWhile()
+	// calls stepper.Free() internally as its first action, and Step()'s
+	// lazy-init logic now handles resyncing state correctly for both the
+	// persisted and non-persisted cases.
 
 	cond := func() bool {
 		if !WallclockTimer(TimerStart, MinimizeWallClockTime) {
@@ -341,7 +438,10 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	pause = true
 
 	MinimizeConverged = l.converged
-	stepper.Free()
+
+	if l != persistentLBFGS {
+		stepper.Free()
+	}
 
 	if l.globIter >= l.MaxIter && !l.converged && l.Verbose > 0 {
 		fmt.Println("WARNING : maximum number of iterations exceeded in LBFGS")
