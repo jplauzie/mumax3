@@ -35,6 +35,18 @@ func Dot(a, b *data.Slice) float32 {
 	return copyback(out)
 }
 
+// DotInto computes dot(a, b) and accumulates the result into dst (a
+// persistent 1-float device buffer), without copying back to host.
+// dst must be zeroed (e.g. via MemsetScalarAsync(dst, 0)) before calling,
+// since reducedot's kernel accumulates via atomicAdd rather than overwriting.
+func DotInto(a, b *data.Slice, dst unsafe.Pointer) {
+	nComp := a.NComp()
+	util.Argument(nComp == b.NComp())
+	for c := 0; c < nComp; c++ {
+		k_reducedot_async(a.DevPtr(c), b.DevPtr(c), dst, 0, a.Len(), reducecfg)
+	}
+}
+
 // Maximum of absolute values of all elements.
 func MaxAbs(in *data.Slice) float32 {
 	util.Argument(in.NComp() == 1)
@@ -93,6 +105,11 @@ func initReduceBuf() {
 	for i := 0; i < N; i++ {
 		reduceBuffers <- MemAlloc(1 * cu.SIZEOF_FLOAT32)
 	}
+}
+
+// MemsetScalarAsync sets a single-float device buffer to val, asynchronously.
+func MemsetScalarAsync(ptr unsafe.Pointer, val float32) {
+	cu.MemsetD32Async(cu.DevicePtr(uintptr(ptr)), math.Float32bits(val), 1, stream0)
 }
 
 // launch configuration for reduce kernels

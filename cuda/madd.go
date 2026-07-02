@@ -1,6 +1,8 @@
 package cuda
 
 import (
+	"unsafe"
+
 	"github.com/mumax/3/data"
 	"github.com/mumax/3/util"
 )
@@ -128,4 +130,31 @@ func Madd7(dst, src1, src2, src3, src4, src5, src6, src7 *data.Slice, factor1, f
 			src6.DevPtr(c), factor6,
 			src7.DevPtr(c), factor7, N, cfg)
 	}
+}
+
+// dst[i] = src1[i]*factor1 + src2[i]*(*factorPtr2)
+func Madd2Ptr(dst, src1, src2 *data.Slice, factor1 float32, factorPtr2 unsafe.Pointer) {
+	N := dst.Len()
+	nComp := dst.NComp()
+	util.Assert(src1.Len() == N && src2.Len() == N)
+	util.Assert(src1.NComp() == nComp && src2.NComp() == nComp)
+	cfg := make1DConf(N)
+	for c := 0; c < nComp; c++ {
+		k_madd2ptr_async(dst.DevPtr(c), src1.DevPtr(c), factor1,
+			src2.DevPtr(c), factorPtr2, N, cfg)
+	}
+}
+
+// ScaleInto computes dst[0] = factor * src[0] for single-float device buffers.
+func ScaleInto(dst, src unsafe.Pointer, factor float32) {
+	cfg := make1DConf(1)
+	k_madd2_async(dst, src, factor, src, 0.0, 1, cfg)
+}
+
+// AxpyPtrInto computes dst[0] = fac1*src1[0] + (*facPtr2)[0]*src2[0]
+// for single-float device buffers, with the second factor itself
+// device-resident.
+func AxpyPtrInto(dst, src1 unsafe.Pointer, fac1 float32, src2, facPtr2 unsafe.Pointer) {
+	cfg := make1DConf(1)
+	k_madd2ptr_async(dst, src1, fac1, src2, facPtr2, 1, cfg)
 }

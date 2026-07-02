@@ -71,3 +71,7 @@ const stream0 = cu.Stream(0)
 func Sync() {
 	stream0.Synchronize()
 }
+
+func DebugBufCheckLen() int {
+	return len(buf_check)
+}

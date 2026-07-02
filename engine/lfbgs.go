@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"math"
 	"time"
+	"unsafe"
 
 	"github.com/mumax/3/cuda"
+	"github.com/mumax/3/cuda/cu"
 	"github.com/mumax/3/data"
 )
 
@@ -16,11 +18,12 @@ var (
 	LBFGSMaxIter   int     = 10000
 	LBFGSVerbose   int     = 0
 	//Nocedal suggests between 3-20, currently mumax is limited to ~10-11 otherwise buffer.go will think there is a memory leak and panic
-	LBFGSHistory       int     = 5
-	LBFGSMaxStepAngle  float64 = 85.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
-	LBFGSPersist       bool    = false
-	LBFGSMinimizerStop float64 = 1e-6
-	LBFGSMaxTorqueStop float64 = 0 // if >0, converge when max torque drops below this (absolute, same units as GetMaxTorque); 0 disables
+	LBFGSHistory         int     = 5
+	LBFGSMaxStepAngle    float64 = 85.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
+	LBFGSPersist         bool    = false
+	LBFGSMinimizerStop   float64 = 1e-6
+	LBFGSMaxTorqueStop   float64 = 0 // if >0, converge when max torque drops below this (absolute, same units as GetMaxTorque); 0 disables
+	LBFGSValidateKernels bool    = false
 )
 var persistentLBFGS *LBFGSMinimizer
 
@@ -74,6 +77,7 @@ func init() {
 	DeclVar("LBFGSPersist", &LBFGSPersist, "If true, reuse the L-BFGS curvature history across MinimizeLBFGS() calls instead of resetting each time. Useful for parameter sweeps with small steps between calls (default: false).")
 	DeclVar("LBFGSMinimizerStop", &LBFGSMinimizerStop, "Minimum change in M for convergence (default: 1e-6).")
 	DeclVar("LBFGSMaxTorqueStop", &LBFGSMaxTorqueStop, "If >0, L-BFGS stops once the maximum torque drops below this value (absolute), independent of LBFGSTolerance. 0 disables this check (default: 0).")
+	DeclVar("LBFGSValidateKernels", &LBFGSValidateKernels, "If true, cross-checks the device-resident L-BFGS kernel path against the reference host-synced path every step and prints the max discrepancy. For development/validation only -- roughly doubles backward-pass cost when enabled. Default: false.")
 }
 
 // LBFGSMinimizer implements the L-BFGS optimization routine, and satisfies
@@ -96,9 +100,11 @@ type LBFGSMinimizer struct {
 	f, f_old, H0k, gradNorm       float64
 	eps, eps2, epsr, tolf2, tolf3 float64
 
-	iter, globIter int
-	converged      bool
-	lastDm         fifoRing // reported to GUI as LastErr, same convention as Minimizer
+	iter, globIter                       int
+	converged                            bool
+	lastDm                               fifoRing         // reported to GUI as LastErr, same convention as Minimizer
+	dAlpha                               []unsafe.Pointer // mHist device scalars, alpha[i] kept resident across backward+forward
+	dNumerator, dBeta, dDiff, dPhiPrime0 unsafe.Pointer
 }
 
 // NewLBFGSMinimizer initializes a new L-BFGS minimizer configuration.
@@ -145,6 +151,17 @@ func (l *LBFGSMinimizer) init() {
 	l.s = cuda.Buffer(3, size)
 	l.y = cuda.Buffer(3, size)
 	l.searchDir = cuda.Buffer(3, size)
+	fmt.Printf("DEBUG: after fixed buffers, buf_check=%d\n", cuda.DebugBufCheckLen())
+
+	l.dAlpha = make([]unsafe.Pointer, l.History)
+	for i := range l.dAlpha {
+		l.dAlpha[i] = cuda.MemAlloc(cu.SIZEOF_FLOAT32)
+	}
+	l.dNumerator = cuda.MemAlloc(cu.SIZEOF_FLOAT32)
+	l.dBeta = cuda.MemAlloc(cu.SIZEOF_FLOAT32)
+	l.dDiff = cuda.MemAlloc(cu.SIZEOF_FLOAT32)
+	l.dPhiPrime0 = cuda.MemAlloc(cu.SIZEOF_FLOAT32)
+	fmt.Printf("DEBUG: after MemAlloc scalars, buf_check=%d\n", cuda.DebugBufCheckLen())
 
 	mHist := l.History
 	l.s_point_vec = make([]*data.Slice, mHist)
@@ -153,25 +170,21 @@ func (l *LBFGSMinimizer) init() {
 		l.s_point_vec[i] = cuda.Buffer(3, size)
 		l.y_point_vec[i] = cuda.Buffer(3, size)
 	}
+	fmt.Printf("DEBUG: after history buffers, buf_check=%d\n", cuda.DebugBufCheckLen())
+
 	l.rho = make([]float64, mHist)
 	l.alpha_LFBGS = make([]float64, mHist)
-
 	l.eps = 1.1920929e-07
 	l.eps2 = math.Sqrt(l.eps)
 	l.epsr = math.Pow(l.eps, 0.9)
-
 	l.H0k = 1.0
 	l.iter = 0
-
 	l.resetRunState()
+	fmt.Printf("DEBUG: after resetRunState, buf_check=%d\n", cuda.DebugBufCheckLen())
 
-	// Only a genuinely fresh minimizer gets to declare "nothing to do" —
-	// a resumed/persisted call always takes at least one real step, since
-	// resetRunState() alone can't tell "exact symmetry" apart from "truly done."
 	if l.gradNorm < (l.epsr * (1.0 + math.Abs(l.f))) {
 		l.converged = true
 	}
-
 	l.initialized = true
 }
 
@@ -229,11 +242,20 @@ func (l *LBFGSMinimizer) Step() {
 		k = mHist
 	}
 
+	var qBefore *data.Slice
+	if LBFGSValidateKernels {
+		qBefore = l.searchDir // scratch: overwritten unconditionally right after this block, never read before then
+		data.Copy(qBefore, l.q)
+	}
+
 	// Backward pass
 	for i := k - 1; i >= 0; i-- {
-		//l.rhoVals[i] = 1.0 / float64(cuda.Dot(l.s_point_vec[i], l.y_point_vec[i]))
 		l.alpha_LFBGS[i] = l.rho[i] * float64(cuda.Dot(l.s_point_vec[i], l.q))
 		cuda.Madd2(l.q, l.q, l.y_point_vec[i], 1.0, float32(-l.alpha_LFBGS[i]))
+	}
+
+	if LBFGSValidateKernels && k > 0 {
+		l.validateBackwardPass(k, qBefore)
 	}
 
 	// Scale q
@@ -350,6 +372,7 @@ func (l *LBFGSMinimizer) Step() {
 // instances) and for explicit reinit when History or grid size changes,
 // even on the persisted instance.
 func (l *LBFGSMinimizer) freeBuffers() {
+	fmt.Printf("DEBUG: freeBuffers called, initialized=%v, buf_check_before=%d\n", l.initialized, cuda.DebugBufCheckLen())
 	if !l.initialized {
 		return
 	}
@@ -364,9 +387,17 @@ func (l *LBFGSMinimizer) freeBuffers() {
 		l.s_point_vec[i].Free()
 		l.y_point_vec[i].Free()
 	}
+	for i := range l.dAlpha {
+		cu.DevicePtr(uintptr(l.dAlpha[i])).Free()
+	}
+	cu.DevicePtr(uintptr(l.dNumerator)).Free()
+	cu.DevicePtr(uintptr(l.dBeta)).Free()
+	cu.DevicePtr(uintptr(l.dDiff)).Free()
+	cu.DevicePtr(uintptr(l.dPhiPrime0)).Free()
 	l.initialized = false
 	l.converged = false
 	l.globIter = 0
+	fmt.Printf("DEBUG: freeBuffers completed, buf_check_after=%d\n", cuda.DebugBufCheckLen())
 }
 
 // Free satisfies the Stepper interface. RunWhile() calls this
@@ -766,5 +797,33 @@ func (l *LBFGSMinimizer) cvsrch(wa *data.Slice, f0 float64, g *data.Slice, stp0 
 			width1 = width
 			width = math.Abs(y.stp - x.stp)
 		}
+	}
+}
+
+// validateBackwardPass recomputes the backward pass using the new
+// device-resident (zero-host-sync) kernel chain, using l.s/l.y as scratch
+// (both are stale from the previous iteration at this point in Step() and
+// unread until recomputed after the line search -- so this is safe and
+// costs zero additional GPU buffer allocations).
+func (l *LBFGSMinimizer) validateBackwardPass(k int, qBefore *data.Slice) {
+	qNew := l.s // scratch, safe until recomputed post-linesearch
+	data.Copy(qNew, qBefore)
+
+	for i := k - 1; i >= 0; i-- {
+		cuda.MemsetScalarAsync(l.dNumerator, 0)
+		cuda.DotInto(l.s_point_vec[i], qNew, l.dNumerator)
+		cuda.ScaleInto(l.dAlpha[i], l.dNumerator, float32(-l.rho[i]))
+		cuda.Madd2Ptr(qNew, qNew, l.y_point_vec[i], 1.0, l.dAlpha[i])
+	}
+
+	diff := l.y // scratch, same reasoning as l.s
+	cuda.Madd2(diff, qNew, l.q, 1.0, -1.0)
+	maxDiff := cuda.MaxVecNorm(diff)
+
+	if l.Verbose > 0 {
+		fmt.Printf("LBFGS backward-pass validation: max|qNew-qOld| = %e\n", maxDiff)
+	}
+	if maxDiff > 1e-4 {
+		fmt.Printf("WARNING: LBFGS backward-pass kernel validation mismatch: %e\n", maxDiff)
 	}
 }
