@@ -47,6 +47,24 @@ func DotInto(a, b *data.Slice, dst unsafe.Pointer) {
 	}
 }
 
+// ScalarMadd2Into computes dst[0] = fac1*src1[0] + fac2*src2[0] for
+// single-float device buffers. Generalizes ScaleInto (which is just this
+// with src2==src1, fac2==0).
+func ScalarMadd2Into(dst, src1, src2 unsafe.Pointer, fac1, fac2 float32) {
+	cfg := make1DConf(1)
+	k_madd2_async(dst, src1, fac1, src2, fac2, 1, cfg)
+}
+
+// CopybackScalar reads a single-float device buffer back to host without
+// recycling it -- for persistent (non-pooled) scalar buffers like
+// LBFGSMinimizer's dPhiPrime0, as opposed to the internal copyback used
+// for pooled reduction buffers.
+func CopybackScalar(ptr unsafe.Pointer) float64 {
+	var result float32
+	MemCpyDtoH(unsafe.Pointer(&result), ptr, cu.SIZEOF_FLOAT32)
+	return float64(result)
+}
+
 // Maximum of absolute values of all elements.
 func MaxAbs(in *data.Slice) float32 {
 	util.Argument(in.NComp() == 1)

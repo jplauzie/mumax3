@@ -42,17 +42,17 @@ func RunMinimizeLBFGS() bool {
 		minimizer.Verbose = LBFGSVerbose
 		minimizer.MaxStepAngle = LBFGSMaxStepAngle
 
-		gradSizeStr := "nil"
+		//gradSizeStr := "nil"
 		if minimizer.grad != nil {
-			gradSizeStr = fmt.Sprintf("%v", minimizer.grad.Size())
+			//gradSizeStr = fmt.Sprintf("%v", minimizer.grad.Size())
 		}
-		fmt.Printf("PRE-FREE CHECK: initialized=%v minimizer.History=%d LBFGSHistory=%d gradSize=%v mSize=%v\n",
-			minimizer.initialized, minimizer.History, LBFGSHistory, gradSizeStr, M.Buffer().Size())
+		//fmt.Printf("PRE-FREE CHECK: initialized=%v minimizer.History=%d LBFGSHistory=%d gradSize=%v mSize=%v\n",
+		//	minimizer.initialized, minimizer.History, LBFGSHistory, gradSizeStr, M.Buffer().Size())
 
 		// History/grid size changes invalidate the allocated buffers --
 		// free and let it lazily reinit (this does wipe history, unavoidably)
 		if minimizer.initialized && (minimizer.History != LBFGSHistory || minimizer.grad.Size() != M.Buffer().Size()) {
-			fmt.Println("PRE-FREE CHECK: freeing due to mismatch")
+			//fmt.Println("PRE-FREE CHECK: freeing due to mismatch")
 			minimizer.freeBuffers() // explicit reinit: always actually free, even if persisted
 
 		}
@@ -242,45 +242,47 @@ func (l *LBFGSMinimizer) Step() {
 		k = mHist
 	}
 
-	var qBefore *data.Slice
-	if LBFGSValidateKernels {
-		qBefore = l.searchDir // scratch: overwritten unconditionally right after this block, never read before then
-		data.Copy(qBefore, l.q)
-	}
-
-	// Backward pass
+	// Backward pass -- fully device-resident, zero host syncs.
 	for i := k - 1; i >= 0; i-- {
-		l.alpha_LFBGS[i] = l.rho[i] * float64(cuda.Dot(l.s_point_vec[i], l.q))
-		cuda.Madd2(l.q, l.q, l.y_point_vec[i], 1.0, float32(-l.alpha_LFBGS[i]))
+		cuda.MemsetScalarAsync(l.dNumerator, 0)
+		cuda.DotInto(l.s_point_vec[i], l.q, l.dNumerator)            // numerator = s_i . q
+		cuda.ScaleInto(l.dAlpha[i], l.dNumerator, float32(l.rho[i])) // alpha[i] = rho[i]*numerator, kept for forward pass
+		cuda.ScaleInto(l.dDiff, l.dNumerator, float32(-l.rho[i]))    // dDiff = -alpha[i], scratch
+		cuda.Madd2Ptr(l.q, l.q, l.y_point_vec[i], 1.0, l.dDiff)      // q -= alpha[i]*y_i
 	}
 
-	if LBFGSValidateKernels && k > 0 {
-		l.validateBackwardPass(k, qBefore)
-	}
-
-	// Scale q
+	// Scale q by H0k -- host-known scalar carried over from the previous
+	// iteration's history update, no sync needed here.
 	cuda.Madd2(l.q, l.q, l.q, float32(l.H0k), 0.0)
 
-	// Forward pass
+	// Forward pass -- fully device-resident.
 	for i := 0; i < k; i++ {
-		beta := l.rho[i] * float64(cuda.Dot(l.y_point_vec[i], l.q))
-		cuda.Madd2(l.q, l.q, l.s_point_vec[i], 1.0, float32(l.alpha_LFBGS[i]-beta))
+		cuda.MemsetScalarAsync(l.dNumerator, 0)
+		cuda.DotInto(l.y_point_vec[i], l.q, l.dNumerator)              // numerator = y_i . q
+		cuda.ScaleInto(l.dBeta, l.dNumerator, float32(l.rho[i]))       // beta = rho[i]*numerator
+		cuda.ScalarMadd2Into(l.dDiff, l.dAlpha[i], l.dBeta, 1.0, -1.0) // dDiff = alpha[i] - beta
+		cuda.Madd2Ptr(l.q, l.q, l.s_point_vec[i], 1.0, l.dDiff)        // q += (alpha[i]-beta)*s_i
 	}
 
-	phiPrime0 := -float64(cuda.Dot(l.grad, l.q))
+	// phiPrime0 = -grad.q -- the one unavoidable host sync per outer
+	// iteration: it drives the descent-direction-reset branch below, which
+	// is a real Go control-flow decision and can't stay device-side.
+	cuda.MemsetScalarAsync(l.dPhiPrime0, 0)
+	cuda.DotInto(l.grad, l.q, l.dPhiPrime0)
+	phiPrime0 := -cuda.CopybackScalar(l.dPhiPrime0)
+
 	isFirstIter := (l.globIter == 0)
 	if phiPrime0 > 0 {
 		data.Copy(l.q, l.grad)
 		l.iter = 0
-		isFirstIter = true // no curvature info survives this reset either
-		phiPrime0 = -float64(cuda.Dot(l.grad, l.q))
+		isFirstIter = true                          // no curvature info survives this reset either
+		phiPrime0 = -float64(cuda.Dot(l.grad, l.q)) // rare path, fine to keep the simple host-sync version here
 		if l.Verbose > 2 {
 			fmt.Println("descent ")
 		}
 	}
 
 	cuda.Madd2(l.searchDir, l.q, l.q, -1.0, 0.0) // searchDir = -q
-
 	var rate float64
 	rate, l.f = l.linesearch(l.x_old, l.f, l.grad, l.searchDir, isFirstIter)
 	if rate == 0.0 && l.Verbose > 0 {
