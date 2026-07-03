@@ -24,6 +24,7 @@ var (
 	LBFGSMinimizerStop   float64 = 1e-6
 	LBFGSMaxTorqueStop   float64 = 0 // if >0, converge when max torque drops below this (absolute, same units as GetMaxTorque); 0 disables
 	LBFGSValidateKernels bool    = false
+	LBFGSUseArmijo       bool    = false
 )
 var persistentLBFGS *LBFGSMinimizer
 
@@ -78,6 +79,7 @@ func init() {
 	DeclVar("LBFGSMinimizerStop", &LBFGSMinimizerStop, "Minimum change in M for convergence (default: 1e-6).")
 	DeclVar("LBFGSMaxTorqueStop", &LBFGSMaxTorqueStop, "If >0, L-BFGS stops once the maximum torque drops below this value (absolute), independent of LBFGSTolerance. 0 disables this check (default: 0).")
 	DeclVar("LBFGSValidateKernels", &LBFGSValidateKernels, "If true, cross-checks the device-resident L-BFGS kernel path against the reference host-synced path every step and prints the max discrepancy. For development/validation only -- roughly doubles backward-pass cost when enabled. Default: false.")
+	DeclVar("LBFGSUseArmijo", &LBFGSUseArmijo, "If true, use Armijo backtracking (sufficient decrease only) instead of the default strong-Wolfe line search (cvsrch). Armijo skips gradient evaluation on rejected trial steps, trading some convergence robustness for fewer torque computations per outer iteration. Default: false.")
 }
 
 // LBFGSMinimizer implements the L-BFGS optimization routine, and satisfies
@@ -494,7 +496,11 @@ func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval float64, g *data.Sli
 			rate = 1.0 // never take a larger-than-unit step with no curvature info yet
 		}
 	}
-	newF, rate, _ = l.cvsrch(x_old, fval, g, rate, searchDir)
+	if LBFGSUseArmijo {
+		newF, rate, _ = l.armijoSearch(x_old, fval, g, rate, searchDir)
+	} else {
+		newF, rate, _ = l.cvsrch(x_old, fval, g, rate, searchDir)
+	}
 	return rate, newF
 }
 
@@ -828,4 +834,83 @@ func (l *LBFGSMinimizer) validateBackwardPass(k int, qBefore *data.Slice) {
 	if maxDiff > 1e-4 {
 		fmt.Printf("WARNING: LBFGS backward-pass kernel validation mismatch: %e\n", maxDiff)
 	}
+}
+
+// EnergyOnly updates the magnetization and returns the system energy,
+// without computing the torque/gradient. Used by Armijo backtracking,
+// where rejected trial steps only need the energy to check sufficient
+// decrease -- skipping torqueFn and its sign-flip madd2 on every rejection.
+func (l *LBFGSMinimizer) EnergyOnly() float64 {
+	M.normalize()
+	return GetTotalEnergy()
+}
+
+// armijoSearch performs backtracking line search along searchDir from wa,
+// accepting the first trial step satisfying the Armijo sufficient-decrease
+// condition. Unlike cvsrch (strong Wolfe), it does not check curvature, so
+// rejected trials only need EnergyOnly() -- no torque computation. The
+// gradient (g) is left stale at wa's value until the very end, where one
+// EnergyAndGradient call brings it up to date at the accepted step; this
+// is the only gradient evaluation the whole search performs.
+func (l *LBFGSMinimizer) armijoSearch(wa *data.Slice, f0 float64, g *data.Slice, stp0 float64, s *data.Slice) (newF, newStp float64, info int) {
+	ftol := 1.0e-4
+	backtrackFactor := 0.5
+	stpmin := 1e-15
+	maxfev := 20
+	eps := 1.1920929e-07 // float32 machine epsilon, same as cvsrch
+
+	dginit := float64(cuda.Dot(g, s))
+	if dginit >= 0.0 {
+		if l.Verbose > 0 {
+			fmt.Printf("WARNING: LBFGS_Minimizer (Armijo):: no descent %e\n", dginit)
+		}
+		return f0, stp0, -1
+	}
+
+	stpAngleCap := math.Inf(1)
+	if l.MaxStepAngle > 0 {
+		maxDirNorm := float64(cuda.MaxVecNorm(s))
+		if maxDirNorm > 0 {
+			maxAngleRad := l.MaxStepAngle * math.Pi / 180.0
+			stpAngleCap = math.Tan(maxAngleRad) / maxDirNorm
+		}
+	}
+
+	finit := f0
+	ftest2 := finit + eps*math.Abs(finit) // relative noise-floor fallback, same as cvsrch
+	stp := stp0
+	if stp > stpAngleCap {
+		stp = stpAngleCap
+		if l.Verbose > 1 {
+			fmt.Printf("LBFGS (Armijo): step clamped by LBFGSMaxStepAngle (%.2f deg)\n", l.MaxStepAngle)
+		}
+	}
+
+	var f float64
+	nfev := 0
+	for {
+		cuda.Madd2(M.Buffer(), wa, s, 1.0, float32(stp))
+		f = l.EnergyOnly()
+		nfev++
+
+		// Accept if either the classic absolute Armijo condition holds,
+		// or energy is within float32 noise of not increasing at all --
+		// the latter matters because dginit (summed over the whole mesh)
+		// can be orders of magnitude larger than the total energy itself,
+		// making the strict absolute-decrease test practically
+		// unsatisfiable at this problem's energy scale.
+		if f <= finit+ftol*stp*dginit || f <= ftest2 {
+			break
+		}
+		if nfev >= maxfev || stp <= stpmin {
+			if l.Verbose > 0 {
+				fmt.Println("WARNING: LBFGS_Minimizer (Armijo): backtracking exhausted, accepting last trial")
+			}
+			break
+		}
+		stp *= backtrackFactor
+	}
+
+	f = l.EnergyAndGradient(g)
+	return f, stp, 0
 }
