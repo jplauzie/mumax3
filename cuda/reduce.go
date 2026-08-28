@@ -18,9 +18,16 @@ const REDUCE_BLOCKSIZE = C.REDUCE_BLOCKSIZE
 // Sum of all elements.
 func Sum(in *data.Slice) float32 {
 	util.Argument(in.NComp() == 1)
-	out := reduceBuf(0)
-	k_reducesum_async(in.DevPtr(0), out, 0, in.Len(), reducecfg)
-	return copyback(out)
+	partials := reduceBufN(reducecfg.nBlocks(), 0)
+	k_reducesum_async(in.DevPtr(0), partials, 0, in.Len(), reducecfg)
+	host := copybackSlice(partials, reducecfg.nBlocks())
+
+	// Add elements of partials on CPU
+	var result float32
+	for _, v := range host {
+		result += v
+	}
+	return result
 }
 
 // Dot product.
