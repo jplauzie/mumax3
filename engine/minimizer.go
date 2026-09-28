@@ -94,9 +94,6 @@ func (mini *Minimizer) Step() {
 	cuda.Madd2(dm, m, m0, 1., -1.)
 	cuda.Madd2(dk, k, k0, -1., 1.) // reversed due to LLNoPrecess sign
 
-	//cuda.ProjectTangent(dm, m0)
-	cuda.ProjectTangent(dk, m0)
-
 	// get maxdiff and add to list
 	max_dm := cuda.MaxVecNorm(dm)
 	mini.lastDm.Add(max_dm)
