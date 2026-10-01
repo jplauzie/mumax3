@@ -499,7 +499,7 @@ func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval float64, g *data.Sli
 	if LBFGSUseArmijo {
 		newF, rate, _ = armijoSearch(x_old, fval, g, rate, searchDir, l.EnergyOnly, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
 	} else {
-		newF, rate, _ = cvsrch(x_old, fval, g, rate, searchDir, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
+		newF, rate, _ = MTlinesearch(x_old, fval, g, rate, searchDir, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
 	}
 	return rate, newF
 }

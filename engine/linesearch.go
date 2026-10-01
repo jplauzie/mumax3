@@ -22,7 +22,7 @@ import (
 // lsPoint is one point evaluated during the line search: the step length,
 // the objective value there, and the directional derivative there.
 type lsPoint struct {
-	stp, f, d float64
+	step, f, slope float64
 }
 
 // cubicCoeffs computes the theta/gamma quantities used by MINPACK's
@@ -31,7 +31,7 @@ type lsPoint struct {
 // pivot point differ from case to case.
 func cubicCoeffs(fa, da, sa, fb, db, sb float64) (theta, gamma float64) {
 	theta = 3.0*(fa-fb)/(sb-sa) + da + db
-	s := math.Max(theta, math.Max(da, db))
+	s := math.Max(math.Abs(theta), math.Max(math.Abs(da), math.Abs(db)))
 	gamma = s * math.Sqrt(math.Max(0.0, (theta/s)*(theta/s)-(da/s)*(db/s)))
 	return theta, gamma
 }
@@ -45,130 +45,136 @@ func cubicCoeffs(fa, da, sa, fb, db, sb float64) (theta, gamma float64) {
 // interval is now bracketed, and infoc, MINPACK's case code (1-4 normally;
 // left at 0 if the inputs were inconsistent, matching the original's
 // behavior of leaving *info untouched on early exit).
-func cstep(x, y, t lsPoint, brackt bool, stpmin, stpmax float64) (newX, newY lsPoint, newStp float64, newBrackt bool, infoc int) {
-	if (brackt && ((t.stp <= math.Min(x.stp, y.stp)) || (t.stp >= math.Max(x.stp, y.stp)))) || (x.d*(t.stp-x.stp) >= 0.0) || (stpmax < stpmin) {
-		return x, y, t.stp, brackt, 0
+// TODO(minpack2): this post-update 0.66 clamp is the MINPACK-1 (mcstep) form.
+func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin, stpmax float64) (newBestPoint, newOtherEndPoint lsPoint, newStep float64, newIsBracketed bool, casecode int) {
+	//check:1 trial is inside bracket,2:slope points towards trial,3: maxStep>minStep, else return early
+	// reconsider casecode0, MP2 doesn't have
+	if (bracketed && ((trialpoint.step <= math.Min(bestpoint.step, otherendpoint.step)) || (trialpoint.step >= math.Max(bestpoint.step, otherendpoint.step)))) || (bestpoint.slope*(trialpoint.step-bestpoint.step) >= 0.0) || (stpmax < stpmin) {
+		return bestpoint, otherendpoint, trialpoint.step, bracketed, 0
 	}
 
-	sgnd := t.d * (x.d / math.Abs(x.d))
+	sgnd := trialpoint.slope * (bestpoint.slope / math.Abs(bestpoint.slope))
 	bound := false
-	var stpf, stpc, stpq float64
+	var chosenstep, cubicstep, quadstep float64
 
 	switch {
-	case t.f > x.f:
-		infoc = 1
+	//trial overshot, so minimum is bracketed between best and trial
+	case trialpoint.f > bestpoint.f:
+		casecode = 1
 		bound = true
-		theta, gamma := cubicCoeffs(x.f, x.d, x.stp, t.f, t.d, t.stp)
-		if t.stp < x.stp {
+		theta, gamma := cubicCoeffs(bestpoint.f, bestpoint.slope, bestpoint.step, trialpoint.f, trialpoint.slope, trialpoint.step)
+		if trialpoint.step < bestpoint.step {
 			gamma = -gamma
 		}
-		p := (gamma - x.d) + theta
-		q := ((gamma - x.d) + gamma) + t.d
+		p := (gamma - bestpoint.slope) + theta
+		q := ((gamma - bestpoint.slope) + gamma) + trialpoint.slope
 		r := p / q
-		stpc = x.stp + r*(t.stp-x.stp)
-		stpq = x.stp + ((x.d/((x.f-t.f)/(t.stp-x.stp)+x.d))/2.0)*(t.stp-x.stp)
-		if math.Abs(stpc-x.stp) < math.Abs(stpq-x.stp) {
-			stpf = stpc
+		cubicstep = bestpoint.step + r*(trialpoint.step-bestpoint.step)
+		quadstep = bestpoint.step + ((bestpoint.slope/((bestpoint.f-trialpoint.f)/(trialpoint.step-bestpoint.step)+bestpoint.slope))/2.0)*(trialpoint.step-bestpoint.step)
+		if math.Abs(cubicstep-bestpoint.step) < math.Abs(quadstep-bestpoint.step) {
+			chosenstep = cubicstep
 		} else {
-			stpf = stpc + (stpq-stpc)/2.0
+			chosenstep = cubicstep + (quadstep-cubicstep)/2.0
 		}
-		brackt = true
-
+		bracketed = true
+	// slope is reversed, but still bracketed
 	case sgnd < 0.0:
-		infoc = 2
-		theta, gamma := cubicCoeffs(x.f, x.d, x.stp, t.f, t.d, t.stp)
-		if t.stp > x.stp {
+		casecode = 2
+		theta, gamma := cubicCoeffs(bestpoint.f, bestpoint.slope, bestpoint.step, trialpoint.f, trialpoint.slope, trialpoint.step)
+		if trialpoint.step > bestpoint.step {
 			gamma = -gamma
 		}
-		p := (gamma - t.d) + theta
-		q := ((gamma - t.d) + gamma) + x.d
+		p := (gamma - trialpoint.slope) + theta
+		q := ((gamma - trialpoint.slope) + gamma) + bestpoint.slope
 		r := p / q
-		stpc = t.stp + r*(x.stp-t.stp)
-		stpq = t.stp + (t.d/(t.d-x.d))*(x.stp-t.stp)
-		if math.Abs(stpc-t.stp) > math.Abs(stpq-t.stp) {
-			stpf = stpc
+		cubicstep = trialpoint.step + r*(bestpoint.step-trialpoint.step)
+		quadstep = trialpoint.step + (trialpoint.slope/(trialpoint.slope-bestpoint.slope))*(bestpoint.step-trialpoint.step)
+		if math.Abs(cubicstep-trialpoint.step) > math.Abs(quadstep-trialpoint.step) {
+			chosenstep = cubicstep
 		} else {
-			stpf = stpq
+			chosenstep = quadstep
 		}
-		brackt = true
+		bracketed = true
 
-	case math.Abs(t.d) < math.Abs(x.d):
-		infoc = 3
+		// slope smaller, bottoming out
+	case math.Abs(trialpoint.slope) < math.Abs(bestpoint.slope):
+		casecode = 3
 		bound = true
-		theta, gamma := cubicCoeffs(x.f, x.d, x.stp, t.f, t.d, t.stp)
-		if t.stp > x.stp {
+		theta, gamma := cubicCoeffs(bestpoint.f, bestpoint.slope, bestpoint.step, trialpoint.f, trialpoint.slope, trialpoint.step)
+		if trialpoint.step > bestpoint.step {
 			gamma = -gamma
 		}
-		p := (gamma - t.d) + theta
-		q := (gamma + (x.d - t.d)) + gamma
+		p := (gamma - trialpoint.slope) + theta
+		q := (gamma + (bestpoint.slope - trialpoint.slope)) + gamma
 		r := p / q
 		if (r < 0.0) && (gamma != 0.0) {
-			stpc = t.stp + r*(x.stp-t.stp)
-		} else if t.stp > x.stp {
-			stpc = stpmax
+			cubicstep = trialpoint.step + r*(bestpoint.step-trialpoint.step)
+		} else if trialpoint.step > bestpoint.step {
+			cubicstep = stpmax
 		} else {
-			stpc = stpmin
+			cubicstep = stpmin
 		}
-		stpq = t.stp + (t.d/(t.d-x.d))*(x.stp-t.stp)
-		if brackt {
-			if math.Abs(t.stp-stpc) < math.Abs(t.stp-stpq) {
-				stpf = stpc
+		quadstep = trialpoint.step + (trialpoint.slope/(trialpoint.slope-bestpoint.slope))*(bestpoint.step-trialpoint.step)
+		if bracketed {
+			if math.Abs(trialpoint.step-cubicstep) < math.Abs(trialpoint.step-quadstep) {
+				chosenstep = cubicstep
 			} else {
-				stpf = stpq
+				chosenstep = quadstep
 			}
 		} else {
-			if math.Abs(t.stp-stpc) > math.Abs(t.stp-stpq) {
-				stpf = stpc
+			if math.Abs(trialpoint.step-cubicstep) > math.Abs(trialpoint.step-quadstep) {
+				chosenstep = cubicstep
 			} else {
-				stpf = stpq
+				chosenstep = quadstep
 			}
 		}
 
 	default:
-		infoc = 4
-		if brackt {
-			theta, gamma := cubicCoeffs(t.f, t.d, t.stp, y.f, y.d, y.stp)
-			if t.stp > y.stp {
+		// still going downhill
+		casecode = 4
+		if bracketed {
+			theta, gamma := cubicCoeffs(trialpoint.f, trialpoint.slope, trialpoint.step, otherendpoint.f, otherendpoint.slope, otherendpoint.step)
+			if trialpoint.step > otherendpoint.step {
 				gamma = -gamma
 			}
-			p := (gamma - t.d) + theta
-			q := ((gamma - t.d) + gamma) + y.d
+			p := (gamma - trialpoint.slope) + theta
+			q := ((gamma - trialpoint.slope) + gamma) + otherendpoint.slope
 			r := p / q
-			stpc = t.stp + r*(y.stp-t.stp)
-			stpf = stpc
-		} else if t.stp > x.stp {
-			stpf = stpmax
+			cubicstep = trialpoint.step + r*(otherendpoint.step-trialpoint.step)
+			chosenstep = cubicstep
+		} else if trialpoint.step > bestpoint.step {
+			chosenstep = stpmax
 		} else {
-			stpf = stpmin
+			chosenstep = stpmin
 		}
 	}
 
 	// Update the bracket endpoints with the newly evaluated trial point.
-	if t.f > x.f {
-		y = t
+	if trialpoint.f > bestpoint.f {
+		otherendpoint = trialpoint
 	} else {
 		if sgnd < 0.0 {
-			y = x
+			otherendpoint = bestpoint
 		}
-		x = t
+		bestpoint = trialpoint
 	}
 
-	stpf = math.Min(stpmax, stpf)
-	stpf = math.Max(stpmin, stpf)
-	newStp = stpf
+	chosenstep = math.Min(stpmax, chosenstep)
+	chosenstep = math.Max(stpmin, chosenstep)
+	newStep = chosenstep
 
-	if brackt && bound {
-		if y.stp > x.stp {
-			newStp = math.Min(x.stp+0.66*(y.stp-x.stp), newStp)
+	if bracketed && bound {
+		if otherendpoint.step > bestpoint.step {
+			newStep = math.Min(bestpoint.step+0.66*(otherendpoint.step-bestpoint.step), newStep)
 		} else {
-			newStp = math.Max(x.stp+0.66*(y.stp-x.stp), newStp)
+			newStep = math.Max(bestpoint.step+0.66*(otherendpoint.step-bestpoint.step), newStep)
 		}
 	}
 
-	return x, y, newStp, brackt, infoc
+	return bestpoint, otherendpoint, newStep, bracketed, casecode
 }
 
-// cvsrch is MINPACK's More-Thuente line search, searching along searchDir
+// MTlinesearch is MINPACK's More-Thuente line search, searching along searchDir
 // (s) from wa for a step satisfying the strong Wolfe conditions. wa is the
 // base point, s the (fixed) search direction; f0/stp0 are the objective
 // value and initial trial step at wa. g must already hold the gradient at
@@ -177,26 +183,42 @@ func cstep(x, y, t lsPoint, brackt bool, stpmin, stpmax float64) (newX, newY lsP
 // (M = wa + stp*s), evaluates energy/gradient there, and returns the
 // energy. Returns the objective value and step length at the accepted
 // point, and an info code (-1 marks early termination on bad input).
-func cvsrch(wa *data.Slice, f0 float64, g *data.Slice, stp0 float64, s *data.Slice,
+
+// Line-search function and its derivative (More-Thuente notation):
+//
+//	phi(a)  = f(m0 + a*d)
+//	phi'(a) = grad f(m0 + a*d) . d
+//
+// initialSlope = phi'(0), trialSlope = phi'(step), initialEnergy = phi(0).
+func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, step0 float64, s *data.Slice,
 	evalEG func(*data.Slice) float64, verbose int, maxStepAngle float64) (newF, newStp float64, info int) {
-	infoc := 1
+	casecode := 1 //case code for cstep
 
-	xtol := 1e-15
-	ftol := 1.0e-4
-	gtol := 0.9
-	eps := 1.1920929e-07 // float32 machine epsilon (energy/gradient come from float32 GPU reductions)
-	stpmin := 1e-15
-	stpmax := 1e15
-	xtrapf := 4.0
-	maxfev := 20
-	nfev := 0
+	// Strong Wolfe conditions (mu = ftol, eta = gtol):
+	//   sufficient decrease:  phi(a) <= phi(0) + mu * a * phi'(0)
+	//   curvature:            |phi'(a)| <= eta * |phi'(0)|
 
-	dginit := float64(cuda.Dot(g, s))
-	if dginit >= 0.0 {
+	bracketWidthTol := 1e-7 //  relative tolerance on [bracketLow, bracketHigh]. Once the bracket is narrower than bracketWidthTol * bracketHigh, the search stops (info = 2).
+	ftol := 1.0e-4          // (Wolfe c1 in N&W) sets how much energy drop a trial step must
+	// deliver. A step is accepted only if the energy falls by at least ftol * step * initialSlope.
+	gtol := 0.9 // tunable. gtol (Wolfe c2) sets how flat the energy must be at the accepted
+	// point. The slope there must satisfy |slope| <= gtol * |initialSlope|,
+	// which rules out steps that stop while the energy is still dropping steeply.
+	// 0.9 is a loose test, the usual choice for quasi-Newton methods.
+	f32eps := 1.1920929e-07 // float32 machine epsilon (energy/gradient come from float32 GPU reductions)
+	minStep := 1e-15
+	maxStep := 1e15
+	extrapfactor := 4.0 //The next trial may be at most step + extrapFactor*(step - bestStep), i.e. about 5x the current step when starting from bestStep = 0.
+	maxEvals := 20
+	numEvals := 0
+
+	slopeinit := float64(cuda.Dot(g, s)) // slopeInit (was dginit) = phi'(0) = g . s. Must be negative (s is a descent direction).
+	if slopeinit >= 0.0 {
+		//not a descent, return immediately
 		if verbose > 0 {
-			fmt.Printf("WARNING: linesearch (Wolfe):: no descent %e\n", dginit)
+			fmt.Printf("WARNING: linesearch (Wolfe):: no descent %e\n", slopeinit)
 		}
-		return f0, stp0, -1
+		return f0, step0, -1
 	}
 
 	// Precompute the angle-based step cap once, before trying any trial steps.
@@ -210,119 +232,135 @@ func cvsrch(wa *data.Slice, f0 float64, g *data.Slice, stp0 float64, s *data.Sli
 		}
 	}
 
-	brackt := false
+	bracketed := false
 	stage1 := true
 
 	f := f0
-	stp := stp0
-	finit := f
-	dgtest := ftol * dginit
-	width := stpmax - stpmin
+	// alpha in MT(1994)
+	step := step0
+	f_init := f
+	dgtest := ftol * slopeinit
+	width := maxStep - minStep
 	width1 := 2.0 * width
 
-	x := lsPoint{stp: 0.0, f: finit, d: dginit}
-	y := lsPoint{stp: 0.0, f: finit, d: dginit}
+	bestPoint := lsPoint{step: 0.0, f: f_init, slope: slopeinit}
+	otherEndPoint := lsPoint{step: 0.0, f: f_init, slope: slopeinit}
 
 	var stmin, stmax float64
 
 	for {
-		if brackt {
-			stmin = math.Min(x.stp, y.stp)
-			stmax = math.Max(x.stp, y.stp)
+		if bracketed == true {
+			stmin = math.Min(bestPoint.step, otherEndPoint.step)
+			stmax = math.Max(bestPoint.step, otherEndPoint.step)
 		} else {
-			stmin = x.stp
-			stmax = stp + xtrapf*(stp-x.stp)
+			stmin = bestPoint.step
+			stmax = step + extrapfactor*(step-bestPoint.step)
 		}
 
-		stp = math.Max(stp, stpmin)
-		stp = math.Min(stp, stpmax)
+		step = math.Max(step, minStep)
+		step = math.Min(step, maxStep)
 
-		if stp > stpAngleCap {
-			stp = stpAngleCap
+		if step > stpAngleCap {
+			step = stpAngleCap
 			if verbose > 1 {
 				fmt.Printf("linesearch: step clamped by MaxStepAngle (%.2f deg)\n", maxStepAngle)
 			}
 		}
 
-		if math.IsNaN(stp) || math.IsInf(stp, 0) {
+		if math.IsNaN(step) || math.IsInf(step, 0) {
 			if verbose > 0 {
-				fmt.Println("WARNING: linesearch: NaN/Inf step detected, resetting to stpmin")
+				fmt.Println("WARNING: linesearch: NaN/Inf step detected, resetting to minStep")
 			}
-			stp = stpmin
+			step = minStep
 		}
 
-		if (brackt && ((stp <= stmin) || (stp >= stmax))) || (nfev >= maxfev-1) || (infoc == 0) || (brackt && (stmax-stmin <= xtol*stmax)) {
-			stp = x.stp
+		if (bracketed && ((step <= stmin) || (step >= stmax))) || (numEvals >= maxEvals-1) || (casecode == 0) || (bracketed && (stmax-stmin <= bracketWidthTol*stmax)) {
+			step = bestPoint.step
 		}
 
-		// Update global M: M = wa + stp * s
-		cuda.Madd2(M.Buffer(), wa, s, 1.0, float32(stp))
+		// Update global M: M = wa + step * s
+		cuda.Madd2(M.Buffer(), wa, s, 1.0, float32(step))
 
 		// Evaluate updated objective
+		// Normalize M, recalculate new torque (gradient, watching minus sign convention) and energy at the trial point.
 		f = evalEG(g)
-		nfev++
+		numEvals++
 
-		dg := float64(cuda.Dot(g, s))
-		ftest1 := finit + stp*dgtest
-		ftest2 := finit + eps*math.Abs(finit)
+		slope := float64(cuda.Dot(g, s))
+		ftest1 := f_init + step*dgtest
+		noisefloor := f_init + f32eps*math.Abs(f_init)
+		//revisit this
 		ft := 2.0*ftol - 1.0
 
+		// 1:success, 2:bracket collapsed,3:numEvals>=maxEvals,4:stuck at minStep,5:stuck at maxStep, 6:step at or beyond end of bracket or cstep fail
+		//	cstep can fail if:trial outside bracket, slope doesn't point towards trial, step limits inverted
 		info = 0
-		if (brackt && ((stp <= stmin) || (stp >= stmax))) || (infoc == 0) {
+		if (bracketed && ((step <= stmin) || (step >= stmax))) || (casecode == 0) {
 			info = 6
 		}
-		if (stp == stpmax) && (f <= ftest2) && (dg <= dgtest) {
+		if (step == maxStep) && (f <= noisefloor) && (slope <= dgtest) {
 			info = 5
 		}
-		if (stp == stpmin) && ((f > ftest2) || (dg >= dgtest)) {
+		if (step == minStep) && ((f > noisefloor) || (slope >= dgtest)) {
 			info = 4
 		}
-		if nfev >= maxfev {
+		if numEvals >= maxEvals {
 			info = 3
 		}
-		if brackt && (stmax-stmin <= xtol*stmax) {
+		if bracketed && (stmax-stmin <= bracketWidthTol*stmax) {
 			info = 2
 		}
-		if (f <= ftest1) && (math.Abs(dg) <= gtol*(-dginit)) {
+		if (f <= ftest1) && (math.Abs(slope) <= gtol*(-slopeinit)) {
 			info = 1
 		}
-		if (f <= ftest2) && (ft*dginit >= dg) && (math.Abs(dg) <= gtol*(-dginit)) {
+		if (f <= noisefloor) && (ft*slopeinit >= slope) && (math.Abs(slope) <= gtol*(-slopeinit)) {
 			info = 1
 		}
 
+		//change -1 return val
 		if info != 0 {
-			return f, stp, -1
+			return f, step, -1
 		}
 
-		if stage1 && (f <= ftest2) && (ft*dginit >= dg) && (dg >= math.Min(ftol, gtol)*dginit) {
+		//we're done with stage1
+		//recheck f<=noisefloor, seems wrong
+		if stage1 && (f <= noisefloor) && (ft*slopeinit >= slope) && (slope >= math.Min(ftol, gtol)*slopeinit) {
 			stage1 = false
 		}
 
-		t := lsPoint{stp: stp, f: f, d: dg}
+		trialpoint := lsPoint{step: step, f: f, slope: slope}
 
-		if stage1 && (f <= x.f) && !((f <= ftest2) && (ft*dginit >= dg)) {
-			// Modified-function trick (subtract off the dgtest*step linear
+		if stage1 && (f <= bestPoint.f) && !((f <= noisefloor) && (ft*slopeinit >= slope)) {
+			// Auxiliary function psi (stage 1 works on psi instead of phi):
+			//   psi(a)  = phi(a) - phi(0) - mu * phi'(0) * a
+			//   psi'(a) = phi'(a) - mu * phi'(0)
+			// psi(a) <= 0 is exactly the sufficient decrease condition. In code the
+			// constant phi(0) is dropped: energy - step*sufficientDecreaseSlope.
+			// Modified-function trick ψ(subtract off the dgtest*step linear
 			// term) while we haven't yet reached a point with a low enough
 			// objective value -- same as MINPACK's cvsrch.
-			xm := lsPoint{stp: x.stp, f: x.f - x.stp*dgtest, d: x.d - dgtest}
-			ym := lsPoint{stp: y.stp, f: y.f - y.stp*dgtest, d: y.d - dgtest}
-			tm := lsPoint{stp: t.stp, f: t.f - t.stp*dgtest, d: t.d - dgtest}
+			bestpointmod := lsPoint{step: bestPoint.step, f: bestPoint.f - bestPoint.step*dgtest, slope: bestPoint.slope - dgtest}
+			otherendpointmod := lsPoint{step: otherEndPoint.step, f: otherEndPoint.f - otherEndPoint.step*dgtest, slope: otherEndPoint.slope - dgtest}
+			trialpointmod := lsPoint{step: trialpoint.step, f: trialpoint.f - trialpoint.step*dgtest, slope: trialpoint.slope - dgtest}
 
-			var newXm, newYm lsPoint
-			newXm, newYm, stp, brackt, infoc = cstep(xm, ym, tm, brackt, stmin, stmax)
+			var newbestpointmod, newotherendpointmod lsPoint
+			newbestpointmod, newotherendpointmod, step, bracketed, casecode = cstep(bestpointmod, otherendpointmod, trialpointmod, bracketed, stmin, stmax)
 
-			x = lsPoint{stp: newXm.stp, f: newXm.f + newXm.stp*dgtest, d: newXm.d + dgtest}
-			y = lsPoint{stp: newYm.stp, f: newYm.f + newYm.stp*dgtest, d: newYm.d + dgtest}
+			//restore φ
+			bestPoint = lsPoint{step: newbestpointmod.step, f: newbestpointmod.f + newbestpointmod.step*dgtest, slope: newbestpointmod.slope + dgtest}
+			otherEndPoint = lsPoint{step: newotherendpointmod.step, f: newotherendpointmod.f + newotherendpointmod.step*dgtest, slope: newotherendpointmod.slope + dgtest}
 		} else {
-			x, y, stp, brackt, infoc = cstep(x, y, t, brackt, stmin, stmax)
+			//φ
+			bestPoint, otherEndPoint, step, bracketed, casecode = cstep(bestPoint, otherEndPoint, trialpoint, bracketed, stmin, stmax)
 		}
 
-		if brackt {
-			if math.Abs(y.stp-x.stp) >= 0.66*width1 {
-				stp = x.stp + 0.5*(y.stp-x.stp)
+		//fallback bisection after bracketing. if bracket doesn't shrink by at least 33% after 2 passes, throwaway cstep proposal and bisect between best and otherEndpoint
+		if bracketed {
+			if math.Abs(otherEndPoint.step-bestPoint.step) >= 0.66*width1 {
+				step = bestPoint.step + 0.5*(otherEndPoint.step-bestPoint.step)
 			}
 			width1 = width
-			width = math.Abs(y.stp - x.stp)
+			width = math.Abs(otherEndPoint.step - bestPoint.step)
 		}
 	}
 }

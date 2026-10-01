@@ -106,18 +106,18 @@ func (mini *Minimizer) Step() {
 		f0 := GetTotalEnergy()
 
 		if mini.firstStep {
-			trialF = mini.lineSearchFallback(m0, f0, k, h)
+			trialF = mini.SD_linesearch(m0, f0, k, h)
 			mini.firstStep = false
 		} else {
 			cuda.Minimize(m, m0, k, h)
 
 			kTrial := cuda.Buffer(3, size)
 			defer cuda.Recycle(kTrial)
-			trialF = evalEnergyGradientSteepest(kTrial)
+			trialF = evalEnergyGradient_SD(kTrial)
 
 			if MinimizeNonMonotone && mini.lastEnergy.count > 0 && trialF > mini.lastEnergy.Max() {
 				data.Copy(M.Buffer(), m0)
-				trialF = mini.lineSearchFallback(m0, f0, k, h)
+				trialF = mini.SD_linesearch(m0, f0, k, h)
 			} else {
 				cuda.Madd2(k, kTrial, kTrial, -1.0, 0.0)
 			}
@@ -154,26 +154,28 @@ func (mini *Minimizer) Step() {
 	NSteps++
 }
 
-// lineSearchFallback runs an inexact line search from wa (energy f0) along
+// SD_linesearch runs an inexact line search from wa (energy f0) along
 // the fixed direction k (m0's torque), used for τ0 and for BB-step
 // rejections. Restores mini.k to the accepted step's raw torque and
 // returns the accepted energy.
-func (mini *Minimizer) lineSearchFallback(wa *data.Slice, f0 float64, k *data.Slice, h float32) float64 {
-	size := wa.Size()
-	g := cuda.Buffer(3, size)
-	defer cuda.Recycle(g)
-	cuda.Madd2(g, k, k, -1.0, 0.0) // g = -k, positive gradient at wa
+func (mini *Minimizer) SD_linesearch(m0 *data.Slice, f0 float64, k *data.Slice, h float32) float64 {
+	size := m0.Size()
+	gradient := cuda.Buffer(3, size)
+	defer cuda.Recycle(gradient)
+	cuda.Madd2(gradient, k, k, -1.0, 0.0) // g = -k, positive gradient at wa
 
 	var newF, newStp float64
 	if LBFGSUseArmijo { // reuse the same toggle, or introduce a dedicated one -- see note
-		newF, newStp, _ = armijoSearch(wa, f0, g, float64(h), k, evalEnergyOnlySteepest, evalEnergyGradientSteepest, 0, 0)
+		//probably drop this and just use MTlinesearch, but for now keep it as a toggle
+		newF, newStp, _ = armijoSearch(m0, f0, gradient, float64(h), k, evalEnergyOnlySteepest, evalEnergyGradient_SD, 0, 0)
 	} else {
-		newF, newStp, _ = cvsrch(wa, f0, g, float64(h), k, evalEnergyGradientSteepest, 0, 0)
+		// cap angle?
+		newF, newStp, _ = MTlinesearch(m0, f0, gradient, float64(h), k, evalEnergyGradient_SD, 0, 0)
 	}
 	mini.h = float32(newStp)
 	// g now holds the positive gradient at the accepted point; k should
 	// hold raw torque, so flip back.
-	cuda.Madd2(k, g, g, -1.0, 0.0)
+	cuda.Madd2(k, gradient, gradient, -1.0, 0.0)
 	return newF
 }
 
@@ -256,12 +258,12 @@ func Minimize() bool {
 	return MinimizeConverged
 }
 
-// evalEnergyGradientSteepest updates the magnetization, normalizes it, and
+// evalEnergyGradient_SD updates the magnetization, normalizes it, and
 // writes the positive gradient (-torque) into g, returning total energy.
 // Mirrors LBFGSMinimizer.EnergyAndGradient's sign convention so both
 // minimizers can share cvsrch/armijoSearch, which expect a positive
 // gradient (dginit = dot(g,s) < 0 for a valid descent direction s).
-func evalEnergyGradientSteepest(g *data.Slice) float64 {
+func evalEnergyGradient_SD(g *data.Slice) float64 {
 	M.normalize()
 	torqueFn(g)
 	cuda.Madd2(g, g, g, -1.0, 0.0) // g = -torque = positive gradient
