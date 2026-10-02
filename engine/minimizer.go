@@ -18,6 +18,7 @@ var (
 	MinimizeUseLineSearch bool    = false
 	MinimizePersist       bool    = false
 	MinimizeNonMonotone   bool    = false
+	MinimizeMaxStepAngle  float64 = 0 // <=0 disables the angle cap in SD line searches
 )
 
 func init() {
@@ -29,6 +30,7 @@ func init() {
 	DeclVar("MinimizeUseLineSearch", &MinimizeUseLineSearch, "If true, use an inexact line search (Exl et al. 2014) for the initial BB step and for non-monotone-rejected steps. If false, reverts to the original fixed h=1e-4 seed with no line search fallback. Default: false.")
 	DeclVar("MinimizePersist", &MinimizePersist, "If true, reuse the Minimizer's BB step size and torque state across Minimize() calls instead of resetting each time. Default: false.")
 	DeclVar("MinimizeNonMonotone", &MinimizeNonMonotone, "If true (default) and MinimizeUseLineSearch is enabled, BB steps that increase energy beyond the recent ExlEnergyWindow max trigger a line-search fallback (Exl et al. 2014). If false, BB steps are always accepted unconditionally after the initial line search, regardless of energy increase.")
+	DeclVar("MinimizeMaxStepAngle", &MinimizeMaxStepAngle, "Max rotation angle (degrees) per line-search trial step in Minimize(); <=0 disables (default: 0).")
 }
 
 var persistentMinimizer *Minimizer
@@ -164,14 +166,18 @@ func (mini *Minimizer) SD_linesearch(m0 *data.Slice, f0 float64, k *data.Slice, 
 	defer cuda.Recycle(gradient)
 	cuda.Madd2(gradient, k, k, -1.0, 0.0) // g = -k, positive gradient at wa
 
-	var newF, newStp float64
-	if LBFGSUseArmijo { // reuse the same toggle, or introduce a dedicated one -- see note
-		//probably drop this and just use MTlinesearch, but for now keep it as a toggle
-		newF, newStp, _ = armijoSearch(m0, f0, gradient, float64(h), k, evalEnergyOnlySteepest, evalEnergyGradient_SD, 0, 0)
-	} else {
-		// cap angle?
-		newF, newStp, _ = MTlinesearch(m0, f0, gradient, float64(h), k, evalEnergyGradient_SD, 0, 0)
+	// cap angle?
+	slope0 := -float64(cuda.Dot(k, k)) // g . s with g = -k, s = k
+	dirNorm := float64(cuda.MaxVecNorm(k))
+	// k is the LLNoPrecess torque, exactly tangent to m, so the tan() angle cap is exact here.
+	//reconsider colddisplacement start
+	const coldDisplacement = 0.1 // initial max |Δm| per cell on a cold start; tunable
+
+	step0 := float64(h)
+	if mini.firstStep && dirNorm > 0 {
+		step0 = coldDisplacement / dirNorm
 	}
+	newF, newStp, _ := MTlinesearch(m0, f0, gradient, slope0, dirNorm, step0, k, evalEnergyGradient_SD, 0, MinimizeMaxStepAngle)
 	mini.h = float32(newStp)
 	// g now holds the positive gradient at the accepted point; k should
 	// hold raw torque, so flip back.
@@ -267,10 +273,5 @@ func evalEnergyGradient_SD(g *data.Slice) float64 {
 	M.normalize()
 	torqueFn(g)
 	cuda.Madd2(g, g, g, -1.0, 0.0) // g = -torque = positive gradient
-	return GetTotalEnergy()
-}
-
-func evalEnergyOnlySteepest() float64 {
-	M.normalize()
 	return GetTotalEnergy()
 }

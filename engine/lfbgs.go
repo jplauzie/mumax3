@@ -19,12 +19,11 @@ var (
 	LBFGSVerbose   int     = 0
 	//Nocedal suggests between 3-20, currently mumax is limited to ~10-11 otherwise buffer.go will think there is a memory leak and panic
 	LBFGSHistory         int     = 5
-	LBFGSMaxStepAngle    float64 = 85.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
+	LBFGSMaxStepAngle    float64 = 89.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
 	LBFGSPersist         bool    = false
 	LBFGSMinimizerStop   float64 = 1e-6
 	LBFGSMaxTorqueStop   float64 = 0 // if >0, converge when max torque drops below this (absolute, same units as GetMaxTorque); 0 disables
 	LBFGSValidateKernels bool    = false
-	LBFGSUseArmijo       bool    = false
 )
 var persistentLBFGS *LBFGSMinimizer
 
@@ -74,12 +73,11 @@ func init() {
 	DeclVar("LBFGSMaxIter", &LBFGSMaxIter, "Maximum number of iterations for the L-BFGS minimizer (default: 10000).")
 	DeclVar("LBFGSVerbose", &LBFGSVerbose, "Verbosity level of the L-BFGS minimizer: 0=silent, 1=basic, 2=detailed (default: 0).")
 	DeclVar("LBFGSHistory", &LBFGSHistory, "Number of previous gradients to store for the L-BFGS inverse Hessian approximation (default: 5).")
-	DeclVar("LBFGSMaxStepAngle", &LBFGSMaxStepAngle, "Maximum angle (degrees) magnetization may rotate in a single L-BFGS trial step; prevents jumping to an unrelated energy basin. Set <=0 to disable (default: 45).")
+	DeclVar("LBFGSMaxStepAngle", &LBFGSMaxStepAngle, "Maximum angle (degrees) magnetization may rotate in a single L-BFGS trial step; prevents jumping to an unrelated energy basin. Set <=0 to disable (default: 89).")
 	DeclVar("LBFGSPersist", &LBFGSPersist, "If true, reuse the L-BFGS curvature history across MinimizeLBFGS() calls instead of resetting each time. Useful for parameter sweeps with small steps between calls (default: false).")
 	DeclVar("LBFGSMinimizerStop", &LBFGSMinimizerStop, "Minimum change in M for convergence (default: 1e-6).")
 	DeclVar("LBFGSMaxTorqueStop", &LBFGSMaxTorqueStop, "If >0, L-BFGS stops once the maximum torque drops below this value (absolute), independent of LBFGSTolerance. 0 disables this check (default: 0).")
 	DeclVar("LBFGSValidateKernels", &LBFGSValidateKernels, "If true, cross-checks the device-resident L-BFGS kernel path against the reference host-synced path every step and prints the max discrepancy. For development/validation only -- roughly doubles backward-pass cost when enabled. Default: false.")
-	DeclVar("LBFGSUseArmijo", &LBFGSUseArmijo, "If true, use Armijo backtracking (sufficient decrease only) instead of the default strong-Wolfe line search (cvsrch). Armijo skips gradient evaluation on rejected trial steps, trading some convergence robustness for fewer torque computations per outer iteration. Default: false.")
 }
 
 // LBFGSMinimizer implements the L-BFGS optimization routine, and satisfies
@@ -272,13 +270,18 @@ func (l *LBFGSMinimizer) Step() {
 	cuda.MemsetScalarAsync(l.dPhiPrime0, 0)
 	cuda.DotInto(l.grad, l.q, l.dPhiPrime0)
 	phiPrime0 := -cuda.CopybackScalar(l.dPhiPrime0)
+	var dirNorm float64
+	if l.MaxStepAngle > 0 {
+		dirNorm = float64(cuda.MaxVecNorm(l.q))
+	}
 
 	isFirstIter := (l.globIter == 0)
-	if phiPrime0 > 0 {
+	if phiPrime0 >= 0 {
 		data.Copy(l.q, l.grad)
 		l.iter = 0
 		isFirstIter = true                          // no curvature info survives this reset either
 		phiPrime0 = -float64(cuda.Dot(l.grad, l.q)) // rare path, fine to keep the simple host-sync version here
+		dirNorm = l.gradNorm                        // q == grad after the reset, norm already known
 		if l.Verbose > 2 {
 			fmt.Println("descent ")
 		}
@@ -286,7 +289,7 @@ func (l *LBFGSMinimizer) Step() {
 
 	cuda.Madd2(l.searchDir, l.q, l.q, -1.0, 0.0) // searchDir = -q
 	var rate float64
-	rate, l.f = l.linesearch(l.x_old, l.f, l.grad, l.searchDir, isFirstIter)
+	l.f, rate = l.linesearch(l.x_old, l.f, l.grad, l.searchDir, phiPrime0, dirNorm, isFirstIter)
 	if rate == 0.0 && l.Verbose > 0 {
 		fmt.Println("Warning: LBFGS_Minimizer: linesearch returned rate == 0.0. This should not happen.")
 	}
@@ -485,10 +488,10 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	return MinimizeConverged
 }
 
-func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval float64, g *data.Slice, searchDir *data.Slice, isFirstIter bool) (rate, newF float64) {
+func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval float64, g *data.Slice, searchDir *data.Slice, slope0, dirNorm float64, isFirstIter bool) (newF, rate float64) {
 	rate = 1.0
 	if isFirstIter {
-		gInfNorm := float64(cuda.MaxVecNorm(g))
+		gInfNorm := l.gradNorm
 		if gInfNorm > 1e-30 {
 			rate = 1.0 / gInfNorm
 		}
@@ -496,12 +499,8 @@ func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval float64, g *data.Sli
 			rate = 1.0
 		}
 	}
-	if LBFGSUseArmijo {
-		newF, rate, _ = armijoSearch(x_old, fval, g, rate, searchDir, l.EnergyOnly, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
-	} else {
-		newF, rate, _ = MTlinesearch(x_old, fval, g, rate, searchDir, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
-	}
-	return rate, newF
+	newF, rate, _ = MTlinesearch(x_old, fval, g, slope0, dirNorm, rate, searchDir, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
+	return newF, rate
 }
 
 // EnergyOnly updates the magnetization and returns the system energy,
