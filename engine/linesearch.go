@@ -44,25 +44,38 @@ func cubicCoeffs(fa, da, sa, fb, db, sb float64) (theta, gamma float64) {
 // left at 0 if the inputs were inconsistent, matching the original's
 // behavior of leaving *info untouched on early exit).
 // TODO(minpack2): this post-update 0.66 clamp is the MINPACK-1 (mcstep) form.
+// cstep is MINPACK-2's safeguarded step ("dcstep"): given the two current
+// bracket endpoints best and other and a newly evaluated trial point, it
+// updates the bracket and proposes the next trial step.
+//
+// bestpoint is the point with the least function value (dcstep's stx) and
+// otherendpoint is the second endpoint (sty). stpmin/stpmax are NOT a global
+// clamp: as in dcstep they only bound the step while extrapolating (unbracketed
+// cases 3 and 4). The caller applies the global [minStep, maxStep] clamp.
+//
+// fnoise is the float32 resolution of f. A trial counts as "higher" than best
+// only if it exceeds best.f by more than fnoise, so within noise the slopes
+// decide (cases 2-4) instead of a random energy ordering.
+//
+// Returns the updated endpoints, the proposed step, whether the minimum is now
+// bracketed, and MINPACK's case code (1-4). casecode 0 is a guard that dcstep
+// does not have: it means the inputs were inconsistent (trial outside the
+// bracket, slope not pointing toward the trial, or stpmax < stpmin). Nothing
+// is updated and the caller falls back to the best point.
 func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin, stpmax, fnoise float64) (newBestPoint, newOtherEndPoint lsPoint, newStep float64, newIsBracketed bool, casecode int) {
-	//check:1 trial is inside bracket,2:slope points towards trial,3: maxStep>minStep, else return early
-	// reconsider casecode0, MP2 doesn't have
 	if (bracketed && ((trialpoint.step <= math.Min(bestpoint.step, otherendpoint.step)) || (trialpoint.step >= math.Max(bestpoint.step, otherendpoint.step)))) || (bestpoint.slope*(trialpoint.step-bestpoint.step) >= 0.0) || (stpmax < stpmin) {
 		return bestpoint, otherendpoint, trialpoint.step, bracketed, 0
 	}
 
-	// Trial counts as "higher" only if it exceeds best by more than float32 noise.
-	// Within noise, the slopes decide (cases 2-4) instead of a random energy ordering.
 	higher := trialpoint.f > bestpoint.f+fnoise
 	sgnd := trialpoint.slope * (bestpoint.slope / math.Abs(bestpoint.slope))
-	bound := false
 	var chosenstep, cubicstep, quadstep float64
 
 	switch {
-	//trial overshot, so minimum is bracketed between best and trial
+	// Case 1: trial overshot, so the minimum is bracketed between best and trial.
+	// Cubic if it is closer to best than the quadratic, else their average.
 	case higher:
 		casecode = 1
-		bound = true
 		theta, gamma := cubicCoeffs(bestpoint.f, bestpoint.slope, bestpoint.step, trialpoint.f, trialpoint.slope, trialpoint.step)
 		if trialpoint.step < bestpoint.step {
 			gamma = -gamma
@@ -78,7 +91,9 @@ func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin,
 			chosenstep = cubicstep + (quadstep-cubicstep)/2.0
 		}
 		bracketed = true
-	// slope is reversed, but still bracketed
+
+	// Case 2: lower f, slopes of opposite sign. Bracketed.
+	// Cubic if it is farther from trial than the secant, else the secant.
 	case sgnd < 0.0:
 		casecode = 2
 		theta, gamma := cubicCoeffs(bestpoint.f, bestpoint.slope, bestpoint.step, trialpoint.f, trialpoint.slope, trialpoint.step)
@@ -97,10 +112,9 @@ func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin,
 		}
 		bracketed = true
 
-		// slope smaller, bottoming out
+	// Case 3: lower f, same-sign slopes, |slope| decreasing.
 	case math.Abs(trialpoint.slope) < math.Abs(bestpoint.slope):
 		casecode = 3
-		bound = true
 		theta, gamma := cubicCoeffs(bestpoint.f, bestpoint.slope, bestpoint.step, trialpoint.f, trialpoint.slope, trialpoint.step)
 		if trialpoint.step > bestpoint.step {
 			gamma = -gamma
@@ -108,6 +122,8 @@ func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin,
 		p := (gamma - trialpoint.slope) + theta
 		q := (gamma + (bestpoint.slope - trialpoint.slope)) + gamma
 		r := p / q
+		// Cubic only if it tends to infinity in the step direction or its
+		// minimum lies beyond trial; otherwise use the extrapolation limit.
 		if (r < 0.0) && (gamma != 0.0) {
 			cubicstep = trialpoint.step + r*(bestpoint.step-trialpoint.step)
 		} else if trialpoint.step > bestpoint.step {
@@ -117,21 +133,32 @@ func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin,
 		}
 		quadstep = trialpoint.step + (trialpoint.slope/(trialpoint.slope-bestpoint.slope))*(bestpoint.step-trialpoint.step)
 		if bracketed {
-			if math.Abs(trialpoint.step-cubicstep) < math.Abs(trialpoint.step-quadstep) {
+			// Cubic if closer to trial than the secant, else the secant; then
+			// stay within 66% of the way to the other endpoint. otherendpoint
+			// is still the pre-update value here, as in dcstep.
+			if math.Abs(cubicstep-trialpoint.step) < math.Abs(quadstep-trialpoint.step) {
 				chosenstep = cubicstep
 			} else {
 				chosenstep = quadstep
+			}
+			if trialpoint.step > bestpoint.step {
+				chosenstep = math.Min(trialpoint.step+0.66*(otherendpoint.step-trialpoint.step), chosenstep)
+			} else {
+				chosenstep = math.Max(trialpoint.step+0.66*(otherendpoint.step-trialpoint.step), chosenstep)
 			}
 		} else {
-			if math.Abs(trialpoint.step-cubicstep) > math.Abs(trialpoint.step-quadstep) {
+			// Extrapolating: cubic if farther from trial than the secant.
+			if math.Abs(cubicstep-trialpoint.step) > math.Abs(quadstep-trialpoint.step) {
 				chosenstep = cubicstep
 			} else {
 				chosenstep = quadstep
 			}
+			chosenstep = math.Min(stpmax, chosenstep)
+			chosenstep = math.Max(stpmin, chosenstep)
 		}
 
+	// Case 4: lower f, same-sign slopes, |slope| not decreasing.
 	default:
-		// still going downhill
 		casecode = 4
 		if bracketed {
 			theta, gamma := cubicCoeffs(trialpoint.f, trialpoint.slope, trialpoint.step, otherendpoint.f, otherendpoint.slope, otherendpoint.step)
@@ -141,8 +168,7 @@ func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin,
 			p := (gamma - trialpoint.slope) + theta
 			q := ((gamma - trialpoint.slope) + gamma) + otherendpoint.slope
 			r := p / q
-			cubicstep = trialpoint.step + r*(otherendpoint.step-trialpoint.step)
-			chosenstep = cubicstep
+			chosenstep = trialpoint.step + r*(otherendpoint.step-trialpoint.step)
 		} else if trialpoint.step > bestpoint.step {
 			chosenstep = stpmax
 		} else {
@@ -160,19 +186,7 @@ func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin,
 		bestpoint = trialpoint
 	}
 
-	chosenstep = math.Min(stpmax, chosenstep)
-	chosenstep = math.Max(stpmin, chosenstep)
-	newStep = chosenstep
-
-	if bracketed && bound {
-		if otherendpoint.step > bestpoint.step {
-			newStep = math.Min(bestpoint.step+0.66*(otherendpoint.step-bestpoint.step), newStep)
-		} else {
-			newStep = math.Max(bestpoint.step+0.66*(otherendpoint.step-bestpoint.step), newStep)
-		}
-	}
-
-	return bestpoint, otherendpoint, newStep, bracketed, casecode
+	return bestpoint, otherendpoint, chosenstep, bracketed, casecode
 }
 
 // Termination codes returned by MTlinesearch.
@@ -202,7 +216,7 @@ const (
 // the gradient into g, and returns the energy. On return M, g and the returned
 // energy correspond to the returned step. step0 is the first trial step;
 // maxStepAngle (degrees, <=0 disables) caps how far any cell's m may rotate.
-func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, slope0, dirNorm, step0 float64, s *data.Slice,
+func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, dirNorm, step0 float64, s *data.Slice,
 	evalEG func(*data.Slice) float64, verbose int, maxStepAngle float64) (newF, newStep float64, info int) {
 
 	const (
@@ -219,11 +233,27 @@ func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, slope0, dirNorm, st
 	)
 
 	// slope0=g.s is φ'(0); passed in, must be negative (s is a descent direction)
+	ms := Msat.MSlice()
+	defer ms.Recycle()
+	V := cellVolume() // applied on the host in float64; keeps ~1e-26 out of float32
+
+	if !(step0 > 0) || math.IsInf(step0, 0) { // also catches NaN
+		if verbose > 0 {
+			fmt.Printf("WARNING: linesearch: invalid step0 %e\n", step0)
+		}
+		return f0, 0, lsNoProgress
+	}
+
+	// slope0 = Σ V·Ms·g·s at step 0 (|wa| = 1, so the 1/|x| factor is 1)
+	slope0 := V * cuda.SlopeAlongLine(g, wa, s, ms, 0)
 	if slope0 >= 0 {
 		if verbose > 0 {
 			fmt.Printf("WARNING: linesearch (Wolfe): no descent %e\n", slope0)
 		}
 		return f0, 0, lsNoDescent
+	}
+	if verbose > 1 {
+		fmt.Printf("ls entry: f0=%e slope0=%e step0=%e dirNorm=%e\n", f0, slope0, step0, dirNorm)
 	}
 
 	// Step cap from max rotation angle. s is ~tangent to m, so a step α rotates
@@ -250,6 +280,7 @@ func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, slope0, dirNorm, st
 	maxStep = math.Max(maxStep, minStep) // keep maxStep >= minStep so cstep doesn't see stpmax < stpmin
 	// Stage 1 works on ψ(α) = φ(α) − φ(0) − μφ'(0)α, ψ'(α) = φ'(α) − μφ'(0),
 	// for which ψ(α) ≤ 0 is exactly sufficient decrease. φ(0) is dropped here.
+
 	armijoSlope := ftol * slope0 // μφ'(0): slope of the sufficient-decrease line φ(0) + armijoSlope·α (negative)
 	toPsi := func(p lsPoint) lsPoint { return lsPoint{p.step, p.f - p.step*armijoSlope, p.slope - armijoSlope} }
 	fromPsi := func(p lsPoint) lsPoint { return lsPoint{p.step, p.f + p.step*armijoSlope, p.slope + armijoSlope} }
@@ -287,6 +318,11 @@ func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, slope0, dirNorm, st
 			}
 			stmax = step + extrapFactor*(step-bestPoint.step)
 		}
+		// Bracket too narrow to subdivide. Two scales: relative to the step
+		// (dcsrch's xtol test), and absolute displacement in m, since float32
+		// can't resolve a move below ~4 ulps of |m| = 1.
+		bracketTight := bracketed && (stmax-stmin <= bracketTol*stmax ||
+			(dirNorm > 0 && (stmax-stmin)*dirNorm <= 4*f32eps))
 
 		step = math.Min(math.Max(step, minStep), maxStep)
 		if verbose > 1 && angleCapped && step == maxStep {
@@ -306,30 +342,94 @@ func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, slope0, dirNorm, st
 		//     skipped and the iteration repeats; reset history / fall back to
 		//     steepest descent instead.
 		if (bracketed && (step <= stmin || step >= stmax)) || numEvals >= maxEvals-1 ||
-			casecode == 0 || (bracketed && stmax-stmin <= bracketTol*stmax) {
+			casecode == 0 || bracketTight {
 			step = bestPoint.step
 		}
 
+		// TODO(revisit): search along a curve on the sphere instead of normalize(base + α·dir).
+		//
+		// Currently the trial point is the straight line x(α) = base + α·dir, projected
+		// back with normalize(). An alternative is a rotation-like curve that stays on
+		// the sphere by construction, e.g. the Cayley form used by cuda/minimize.cu:
+		//
+		//	m(α) = ((4 - α²|t|²)·m0 + 4α·t) / (4 + α²|t|²),   t tangent to m0
+		//
+		// This is an exact rotation by 2·atan(α|t|/2). It agrees with the current curve
+		// to first order, so φ'(0) = g·t is unchanged, but the curves diverge at large α.
+		// Candidate slope (derive and FD-check before trusting; uses g·m = 0 at the trial point):
+		//
+		//	φ'(α) = V·Σ Ms·(4 g·t - 2α|t|² g·m0) / (4 + α²|t|²)
+		//
+		// It has the same inputs as the current slope kernel, drops rsqrtf and |x|, and
+		// adds one dot product.
+		//
+		// What it would improve:
+		//
+		// SD (Minimizer):
+		//   - Its BB step already moves along the Cayley curve via cuda.Minimize(m, m0, k, h),
+		//     but this line search optimizes along normalize(m0 + α·k). The accepted step h is
+		//     therefore applied on a slightly different curve than the one it was tuned on.
+		//     Using cuda.Minimize as the trial-point generator removes that mismatch, and the
+		//     torque k is exactly tangent, so no projection is needed.
+		//   - Cleaner angle cap: rotation is exactly 2·atan(α|t|/2), so
+		//     α_max = 2·tan(θmax/2)/dirNorm (≈1.97/dirNorm at 89°) instead of
+		//     tan(θmax)/dirNorm (≈57/dirNorm at 89°).
+		//   - BB seeds are already in Cayley units, so they stay consistent with the search.
+		//
+		// L-BFGS:
+		//   - No |x| factor, no lost-norm issue: M is on the sphere at every trial.
+		//   - Same cleaner angle cap as above.
+		//   - Requires a tangent direction. The two-loop recursion mixes history vectors from
+		//     other points, so dir is generally NOT tangent to base. Project once per
+		//     iteration, dir_t = dir - (dir·m)·m, before the search. This leaves φ'(0)
+		//     unchanged since g·m = 0 implies g·dir_t = g·dir. Without projection |m| != 1
+		//     and the slope formula above is wrong. Needs a new trial-point kernel (SD can
+		//     reuse minimize).
+		//   - Keep M.normalize() in evalEG as float32 insurance (becomes a near no-op).
+		//
+		// Related, larger design question (separate change): vector transport of the L-BFGS
+		// history. The stored s_i and y_i live in tangent spaces at different points of the
+		// sphere, and the two-loop recursion combines them as if they shared one. The
+		// simplest transport is to project each stored vector onto the current tangent space
+		// (v -> v - (v·m)·m) before use, or at insertion time. Related: y = grad - grad_old
+		// mixes gradients from different tangent spaces, and s = M - x_old is a chord, not a
+		// tangent vector. Also, the history uses the unweighted g, not the V·Ms-weighted
+		// gradient, so it is not a quasi-Newton model of f (see the weighted-metric item).
+		//
+		// Suggested order: do SD first (nearly free, removes a real inconsistency), measure
+		// iteration counts before/after in isolation, then L-BFGS, then consider transport.
+		// Not done yet because the current formulation is validated (FD/slope ≈ 1.000) and
+		// this touches the kernel, both callers and the cap logic together.
 		cuda.Madd2(M.Buffer(), wa, s, 1.0, float32(step)) // M = wa + step*s
 		f := evalEG(g)                                    // normalizes M, fills g, returns E
 		numEvals++
-		slope := cuda.SlopeAlongLine(g, wa, s, float32(step))
+		slope := V * cuda.SlopeAlongLine(g, wa, s, ms, float32(step))
+
+		if verbose > 1 {
+			fmt.Printf("ls trial %d: step=%e dE=%e FD=%e slope=%e FD/slope=%e\n",
+				numEvals, step, f-f0, (f-f0)/step, slope, ((f-f0)/step)/slope)
+		}
 
 		ftest1 := f0 + step*armijoSlope + fnoise // Armijo bound: φ(0) + μ α φ'(0), plus fnoise slack (MINPACK's ftest)
 		// Hager-Zhang approximate Wolfe (SIOPT 2005): accept if f is within float32
 		// noise of f0 and the slope has flattened (φ' ≤ (2μ-1)φ'(0)). Rescues steps
 		// whose energy decrease is below float32 resolution, where Armijo can't pass.
 		approxWolfe := f <= f0+fnoise && approxSlopeCoef*slope0 >= slope // Hager-Zhang approximate Wolfe
+		//^-- double check if HZ is needed, fnoise might already handle this
 		curvatureOK := math.Abs(slope) <= gtol*(-slope0)
 
 		info = lsRunning
+
+		// bracketed but hit edge of bracket or outside
 		if (bracketed && (step <= stmin || step >= stmax)) || casecode == 0 {
 			info = lsNoProgress
 		}
+
+		// hit maxStep but it's still decreasing sufficiently (and so is slope)
 		if step == maxStep && f <= ftest1 && slope <= armijoSlope {
 			info = lsAtMaxStep
 		}
-		// Step too small for float32 to resolve (displacement < ~4 ulps of |m|=1) is
+		// hit minstep, or equivalently Step too small for float32 to resolve (displacement < ~4 ulps of |m|=1) is
 		// equivalent to being stuck at stpmin: shrinking further changes nothing.
 		unresolvable := dirNorm > 0 && step*dirNorm <= 4*f32eps
 		if (step == minStep || unresolvable) && (f > ftest1 || slope >= armijoSlope) {
@@ -338,15 +438,21 @@ func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, slope0, dirNorm, st
 		if numEvals >= maxEvals {
 			info = lsMaxEvals
 		}
-		if bracketed && stmax-stmin <= bracketTol*stmax {
+		//bracket shrank too small
+		if bracketTight {
 			info = lsBracketTol
 		}
+		//passes both strong Wolfe conditions
 		if (f <= ftest1 && curvatureOK) || (approxWolfe && curvatureOK) {
 			info = lsConverged
 		}
 		if info != lsRunning {
 			if verbose > 1 {
 				fmt.Printf("linesearch: info=%d evals=%d step=%e\n", info, numEvals, step)
+				if info == lsBracketTol {
+					fmt.Printf("linesearch: bracket displacement=%e (float32 floor %e)\n",
+						(stmax-stmin)*dirNorm, 4*f32eps)
+				}
 			}
 			return f, step, info
 		}
@@ -356,7 +462,7 @@ func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, slope0, dirNorm, st
 		}
 
 		trial := lsPoint{step, f, slope}
-
+		//last section to review
 		if stage1 && f <= bestPoint.f+fnoise && f > ftest1 {
 			// Stage 1: apply the updating algorithm to ψ instead of φ.
 			var b, o lsPoint
@@ -366,7 +472,7 @@ func MTlinesearch(wa *data.Slice, f0 float64, g *data.Slice, slope0, dirNorm, st
 			bestPoint, otherEndPoint, step, bracketed, casecode = cstep(bestPoint, otherEndPoint, trial, bracketed, stmin, stmax, fnoise)
 		}
 		// Bisection safeguard: if the bracket hasn't shrunk to <66% of its
-		// width two iterations ago, discard cstep's proposal and bisect.
+		// width two iterations ago, discard cstep's proposal and bisect. new trial point is midway between bracket endpoints
 		if bracketed {
 			if math.Abs(otherEndPoint.step-bestPoint.step) >= 0.66*width1 {
 				step = bestPoint.step + 0.5*(otherEndPoint.step-bestPoint.step)

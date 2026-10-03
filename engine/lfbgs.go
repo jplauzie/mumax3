@@ -18,12 +18,11 @@ var (
 	LBFGSMaxIter   int     = 10000
 	LBFGSVerbose   int     = 0
 	//Nocedal suggests between 3-20, currently mumax is limited to ~10-11 otherwise buffer.go will think there is a memory leak and panic
-	LBFGSHistory         int     = 5
-	LBFGSMaxStepAngle    float64 = 89.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
-	LBFGSPersist         bool    = false
-	LBFGSMinimizerStop   float64 = 1e-6
-	LBFGSMaxTorqueStop   float64 = 0 // if >0, converge when max torque drops below this (absolute, same units as GetMaxTorque); 0 disables
-	LBFGSValidateKernels bool    = false
+	LBFGSHistory       int     = 5
+	LBFGSMaxStepAngle  float64 = 89.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
+	LBFGSPersist       bool    = false
+	LBFGSMinimizerStop float64 = 1e-6
+	LBFGSMaxTorqueStop float64 = 0 // if >0, converge when max torque drops below this (absolute, same units as GetMaxTorque); 0 disables
 )
 var persistentLBFGS *LBFGSMinimizer
 
@@ -77,7 +76,6 @@ func init() {
 	DeclVar("LBFGSPersist", &LBFGSPersist, "If true, reuse the L-BFGS curvature history across MinimizeLBFGS() calls instead of resetting each time. Useful for parameter sweeps with small steps between calls (default: false).")
 	DeclVar("LBFGSMinimizerStop", &LBFGSMinimizerStop, "Minimum change in M for convergence (default: 1e-6).")
 	DeclVar("LBFGSMaxTorqueStop", &LBFGSMaxTorqueStop, "If >0, L-BFGS stops once the maximum torque drops below this value (absolute), independent of LBFGSTolerance. 0 disables this check (default: 0).")
-	DeclVar("LBFGSValidateKernels", &LBFGSValidateKernels, "If true, cross-checks the device-resident L-BFGS kernel path against the reference host-synced path every step and prints the max discrepancy. For development/validation only -- roughly doubles backward-pass cost when enabled. Default: false.")
 }
 
 // LBFGSMinimizer implements the L-BFGS optimization routine, and satisfies
@@ -289,7 +287,7 @@ func (l *LBFGSMinimizer) Step() {
 
 	cuda.Madd2(l.searchDir, l.q, l.q, -1.0, 0.0) // searchDir = -q
 	var rate float64
-	l.f, rate = l.linesearch(l.x_old, l.f, l.grad, l.searchDir, phiPrime0, dirNorm, isFirstIter)
+	l.f, rate = l.linesearch(l.x_old, l.f, l.grad, l.searchDir, dirNorm, isFirstIter)
 	if rate == 0.0 && l.Verbose > 0 {
 		fmt.Println("Warning: LBFGS_Minimizer: linesearch returned rate == 0.0. This should not happen.")
 	}
@@ -488,18 +486,15 @@ func (l *LBFGSMinimizer) MinimizeLBFGS() bool {
 	return MinimizeConverged
 }
 
-func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval float64, g *data.Slice, searchDir *data.Slice, slope0, dirNorm float64, isFirstIter bool) (newF, rate float64) {
+func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval float64, g *data.Slice, searchDir *data.Slice, dirNorm float64, isFirstIter bool) (newF, rate float64) {
 	rate = 1.0
 	if isFirstIter {
 		gInfNorm := l.gradNorm
 		if gInfNorm > 1e-30 {
-			rate = 1.0 / gInfNorm
-		}
-		if rate > 1.0 {
-			rate = 1.0
+			rate = 1 / gInfNorm
 		}
 	}
-	newF, rate, _ = MTlinesearch(x_old, fval, g, slope0, dirNorm, rate, searchDir, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
+	newF, rate, _ = MTlinesearch(x_old, fval, g, dirNorm, rate, searchDir, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
 	return newF, rate
 }
 

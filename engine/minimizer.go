@@ -3,6 +3,7 @@ package engine
 // Minimize follows the steepest descent method as per Exl et al., JAP 115, 17D118 (2014).
 
 import (
+	"math"
 	"time"
 
 	"github.com/mumax/3/cuda"
@@ -117,7 +118,10 @@ func (mini *Minimizer) Step() {
 			defer cuda.Recycle(kTrial)
 			trialF = evalEnergyGradient_SD(kTrial)
 
-			if MinimizeNonMonotone && mini.lastEnergy.count > 0 && trialF > mini.lastEnergy.Max() {
+			const f32eps = 1.1920929e-07 // or promote to a package-level const, see below
+
+			if MinimizeNonMonotone && mini.lastEnergy.count > 0 &&
+				trialF > mini.lastEnergy.Max()+4*f32eps*math.Abs(trialF) {
 				data.Copy(M.Buffer(), m0)
 				trialF = mini.SD_linesearch(m0, f0, k, h)
 			} else {
@@ -166,19 +170,26 @@ func (mini *Minimizer) SD_linesearch(m0 *data.Slice, f0 float64, k *data.Slice, 
 	defer cuda.Recycle(gradient)
 	cuda.Madd2(gradient, k, k, -1.0, 0.0) // g = -k, positive gradient at wa
 
-	// cap angle?
-	slope0 := -float64(cuda.Dot(k, k)) // g . s with g = -k, s = k
 	dirNorm := float64(cuda.MaxVecNorm(k))
 	// k is the LLNoPrecess torque, exactly tangent to m, so the tan() angle cap is exact here.
 	//reconsider colddisplacement start
 	const coldDisplacement = 0.1 // initial max |Δm| per cell on a cold start; tunable
 
-	step0 := float64(h)
-	if mini.firstStep && dirNorm > 0 {
-		step0 = coldDisplacement / dirNorm
+	step0 := math.Abs(float64(mini.h))
+	if mini.firstStep || step0 == 0 || math.IsNaN(step0) || math.IsInf(step0, 0) {
+		if dirNorm > 0 {
+			step0 = coldDisplacement / dirNorm
+		}
 	}
-	newF, newStp, _ := MTlinesearch(m0, f0, gradient, slope0, dirNorm, step0, k, evalEnergyGradient_SD, 0, MinimizeMaxStepAngle)
-	mini.h = float32(newStp)
+	newF, newStp, info := MTlinesearch(m0, f0, gradient, dirNorm, step0, k, evalEnergyGradient_SD, 0, MinimizeMaxStepAngle)
+
+	// Only keep the step as the new seed if the search actually succeeded.
+	// lsAtMaxStep is acceptable: the energy was still dropping at the cap.
+	if info == lsConverged || info == lsAtMaxStep {
+		mini.h = float32(newStp)
+	}
+	// else: leave mini.h unchanged (info 4/6 etc. can return tiny or zero steps)
+
 	// g now holds the positive gradient at the accepted point; k should
 	// hold raw torque, so flip back.
 	cuda.Madd2(k, gradient, gradient, -1.0, 0.0)
