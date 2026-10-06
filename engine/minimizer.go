@@ -30,8 +30,8 @@ func init() {
 	DeclVar("ExlEnergyWindow", &ExlEnergyWindow, "Number of recent energy values kept for the non-monotone line-search fallback in Minimize() (Exl et al. 2014). Default: 20.")
 	DeclVar("MinimizeUseLineSearch", &MinimizeUseLineSearch, "If true, use an inexact line search (Exl et al. 2014) for the initial BB step and for non-monotone-rejected steps. If false, reverts to the original fixed h=1e-4 seed with no line search fallback. Default: false.")
 	DeclVar("MinimizePersist", &MinimizePersist, "If true, reuse the Minimizer's BB step size and torque state across Minimize() calls instead of resetting each time. Default: false.")
-	DeclVar("MinimizeNonMonotone", &MinimizeNonMonotone, "If true (default) and MinimizeUseLineSearch is enabled, BB steps that increase energy beyond the recent ExlEnergyWindow max trigger a line-search fallback (Exl et al. 2014). If false, BB steps are always accepted unconditionally after the initial line search, regardless of energy increase.")
-	DeclVar("MinimizeMaxStepAngle", &MinimizeMaxStepAngle, "Max rotation angle (degrees) per line-search trial step in Minimize(); <=0 disables (default: 0).")
+	DeclVar("MinimizeNonMonotone", &MinimizeNonMonotone, "If true and MinimizeUseLineSearch is enabled, BB steps that increase energy beyond the recent ExlEnergyWindow max trigger a line-search fallback (Exl et al. 2014). If false (default), BB steps are always accepted unconditionally after the initial line search, regardless of energy increase.")
+	DeclVar("MinimizeMaxStepAngle", &MinimizeMaxStepAngle, "Max rotation angle (degrees) per line-search trial step in Minimize(); <=0 disables (default: 0). Clamped to 89 max.")
 }
 
 var persistentMinimizer *Minimizer
@@ -117,8 +117,6 @@ func (mini *Minimizer) Step() {
 			kTrial := cuda.Buffer(3, size)
 			defer cuda.Recycle(kTrial)
 			trialF = evalEnergyGradient_SD(kTrial)
-
-			const f32eps = 1.1920929e-07 // or promote to a package-level const, see below
 
 			if MinimizeNonMonotone && mini.lastEnergy.count > 0 &&
 				trialF > mini.lastEnergy.Max()+4*f32eps*math.Abs(trialF) {
@@ -275,11 +273,6 @@ func Minimize() bool {
 	return MinimizeConverged
 }
 
-// evalEnergyGradient_SD updates the magnetization, normalizes it, and
-// writes the positive gradient (-torque) into g, returning total energy.
-// Mirrors LBFGSMinimizer.EnergyAndGradient's sign convention so both
-// minimizers can share cvsrch/armijoSearch, which expect a positive
-// gradient (dginit = dot(g,s) < 0 for a valid descent direction s).
 func evalEnergyGradient_SD(g *data.Slice) float64 {
 	M.normalize()
 	torqueFn(g)

@@ -19,7 +19,7 @@ var (
 	LBFGSVerbose   int     = 0
 	//Nocedal suggests between 3-20, currently mumax is limited to ~10-11 otherwise buffer.go will think there is a memory leak and panic
 	LBFGSHistory       int     = 5
-	LBFGSMaxStepAngle  float64 = 89.0 // max degrees any cell's m may rotate in one trial step (<=0 disables)
+	LBFGSMaxStepAngle  float64 = 89.0 // max degrees any cell's m may rotate in one trial step (<=0 disables), clamped to a max of 89
 	LBFGSPersist       bool    = false
 	LBFGSMinimizerStop float64 = 1e-6
 	LBFGSMaxTorqueStop float64 = 0 // if >0, converge when max torque drops below this (absolute, same units as GetMaxTorque); 0 disables
@@ -172,7 +172,7 @@ func (l *LBFGSMinimizer) init() {
 
 	l.rho = make([]float64, mHist)
 	l.alpha_LFBGS = make([]float64, mHist)
-	l.eps = 1.1920929e-07
+	l.eps = f32eps
 	l.eps2 = math.Sqrt(l.eps)
 	l.epsr = math.Pow(l.eps, 0.9)
 	l.H0k = 1.0
@@ -268,10 +268,11 @@ func (l *LBFGSMinimizer) Step() {
 	cuda.MemsetScalarAsync(l.dPhiPrime0, 0)
 	cuda.DotInto(l.grad, l.q, l.dPhiPrime0)
 	phiPrime0 := -cuda.CopybackScalar(l.dPhiPrime0)
-	var dirNorm float64
-	if l.MaxStepAngle > 0 {
-		dirNorm = float64(cuda.MaxVecNorm(l.q))
-	}
+	//try to get rid of this extra kernel call if possible
+	//if l.MaxStepAngle > 0 {
+	//	maxDirNorm = float64(cuda.MaxVecNorm(l.q))
+	//}
+	maxDirNorm := float64(cuda.MaxVecNorm(l.q))
 
 	isFirstIter := (l.globIter == 0)
 	if phiPrime0 >= 0 {
@@ -279,7 +280,7 @@ func (l *LBFGSMinimizer) Step() {
 		l.iter = 0
 		isFirstIter = true                          // no curvature info survives this reset either
 		phiPrime0 = -float64(cuda.Dot(l.grad, l.q)) // rare path, fine to keep the simple host-sync version here
-		dirNorm = l.gradNorm                        // q == grad after the reset, norm already known
+		maxDirNorm = l.gradNorm                     // q == grad after the reset, norm already known
 		if l.Verbose > 2 {
 			fmt.Println("descent ")
 		}
@@ -287,7 +288,7 @@ func (l *LBFGSMinimizer) Step() {
 
 	cuda.Madd2(l.searchDir, l.q, l.q, -1.0, 0.0) // searchDir = -q
 	var rate float64
-	l.f, rate = l.linesearch(l.x_old, l.f, l.grad, l.searchDir, dirNorm, isFirstIter)
+	l.f, rate = l.linesearch(l.x_old, l.f, l.grad, l.searchDir, maxDirNorm, isFirstIter)
 	if rate == 0.0 && l.Verbose > 0 {
 		fmt.Println("Warning: LBFGS_Minimizer: linesearch returned rate == 0.0. This should not happen.")
 	}
