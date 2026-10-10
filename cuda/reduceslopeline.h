@@ -2,10 +2,10 @@
 #define REDUCESLOPELINE_H_
 
 #include <stdint.h>
+#include "reduce.h"
 
-#ifndef BLOCKDIM
-#define BLOCKDIM 512 // MUST equal reducecfg.Block.X; multiple of 32, at most 1024
-#endif
+// Must equal the launch block size (reducecfg.Block.X). Single source: reduce.h.
+#define BLOCKDIM REDUCE_BLOCKSIZE
 
 constexpr int warp_size = 32;
 

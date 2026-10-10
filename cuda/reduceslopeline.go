@@ -11,7 +11,7 @@ import (
 var (
 	slopePartials unsafe.Pointer // reducecfg.Grid.X floats
 	slopeOut      unsafe.Pointer // one float32
-	combineCfg    = &config{Grid: cu.Dim3{X: 1, Y: 1, Z: 1}, Block: cu.Dim3{X: 512, Y: 1, Z: 1}}
+	combineCfg    = &config{Grid: cu.Dim3{X: 1, Y: 1, Z: 1}, Block: cu.Dim3{X: reducecfg.Block.X, Y: 1, Z: 1}}
 )
 
 // SlopeAlongLine returns phi'(step) for phi(a) = E(normalize(wa + a*s)):
