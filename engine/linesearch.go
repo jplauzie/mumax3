@@ -181,7 +181,7 @@ func cstep(bestpoint, otherendpoint, trialpoint lsPoint, bracketed bool, stpmin,
 // energy correspond to the returned step. step0 is the first trial step;
 // maxStepAngle (degrees, <=0 disables) caps how far any cell's m may rotate.
 func MTlinesearch(m0 *data.Slice, f0 float64, g *data.Slice, maxDirNorm, step0 float64, s *data.Slice,
-	evalEG func(*data.Slice) float64, verbose int, maxStepAngle float64) (newF, newStep float64, info int) {
+	evalEG func(*data.Slice) float64, verbose int, maxStepAngle float64, eScale float64) (newF, newStep float64, info int) {
 
 	const (
 		// these are all tunable
@@ -209,7 +209,7 @@ func MTlinesearch(m0 *data.Slice, f0 float64, g *data.Slice, maxDirNorm, step0 f
 	// slope0= Σ V·M_s·g·s at step 0 (|m0| = 1, so the 1/|x| factor is 1)
 	// slope0= g.s is φ'(0); must be negative (s is a descent direction)
 	slope0 := V * cuda.SlopeAlongLine(g, m0, s, ms, 0)
-	if slope0 >= 0 {
+	if !(slope0 < 0) { // also catches NaN
 		if verbose > 0 {
 			fmt.Printf("WARNING: linesearch (Wolfe): no descent %e\n", slope0)
 		}
@@ -265,8 +265,9 @@ func MTlinesearch(m0 *data.Slice, f0 float64, g *data.Slice, maxDirNorm, step0 f
 	numEvals := 0
 	width, width1 := maxStep-minStep, 2*(maxStep-minStep) // for the bisection safeguard
 	var stmin, stmax float64
-	//replace | f0 | with max(|f0|, Σ|term energies|), recorded as LastEnergyScale inside GetTotalEnergy().
-	fnoise := f32eps * math.Abs(f0) // float32 resolution of the energy
+	// float32 resolution of the energy. eScale = max(|E|, Σ|E_i|) at m0 accounts for
+	// cancellation between energy terms; <= 0 falls back to |f0|.
+	fnoise := f32eps * math.Max(math.Abs(f0), eScale)
 
 	for {
 		if math.IsNaN(step) || math.IsInf(step, 0) {
@@ -381,6 +382,22 @@ func MTlinesearch(m0 *data.Slice, f0 float64, g *data.Slice, maxDirNorm, step0 f
 		if verbose > 1 {
 			fmt.Printf("ls trial %d: step=%e dE=%e FD=%e slope=%e FD/slope=%e\n",
 				numEvals, step, f-f0, (f-f0)/step, slope, ((f-f0)/step)/slope)
+		}
+
+		// A non-finite trial (overflow, or NaN from the field kernels) must not reach cstep:
+		// NaN compares false everywhere, so cstep would take it as an improvement.
+		if math.IsNaN(f) || math.IsInf(f, 0) || math.IsNaN(slope) || math.IsInf(slope, 0) {
+			if verbose > 0 {
+				fmt.Printf("WARNING: linesearch: non-finite trial at step=%e, shrinking\n", step)
+			}
+			if step == bestPoint.step || numEvals >= maxEvals {
+				// Nothing finite left to try. M and g are NOT restored here: callers must
+				// restore M (SD_linesearch does).
+				return f0, 0, lsNoProgress
+			}
+			step = bestPoint.step + 0.25*(step-bestPoint.step)
+			casecode = 1 // 0 would trigger the best-point fallback at the top of the loop
+			continue
 		}
 
 		ftest1 := f0 + step*armijoSlope + fnoise // Armijo bound: φ(0) + μ α φ'(0), plus fnoise slack (MINPACK's ftest)

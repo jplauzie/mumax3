@@ -495,7 +495,8 @@ func (l *LBFGSMinimizer) linesearch(x_old *data.Slice, fval float64, g *data.Sli
 			rate = 1 / gInfNorm
 		}
 	}
-	newF, rate, _ = MTlinesearch(x_old, fval, g, dirNorm, rate, searchDir, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle)
+	//fix the 0 call
+	newF, rate, _ = MTlinesearch(x_old, fval, g, dirNorm, rate, searchDir, l.EnergyAndGradient, l.Verbose, l.MaxStepAngle, 0)
 	return newF, rate
 }
 
